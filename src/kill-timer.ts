@@ -15,6 +15,11 @@ export interface KillTimerDeps {
    * layout ready + 15 s (so restored tabs have been counted); the timer must not start before that decision is made.
    */
   suspended?(slug: string): boolean;
+  /**
+   * True when the last Stop of the instance failed (the group could not be signalled). The timer does not arm for it:
+   * retrying on its own would fail again every grace period and repeat the notice without end.
+   */
+  stopFailed?(slug: string): boolean;
   /** The project's Kill-when-all-tabs-closed toggle as stored now; undefined when the project is gone. */
   killOnClose(slug: string): boolean | undefined;
   /** Stop the instance (the same call as the Stop command). */
@@ -28,7 +33,7 @@ export interface KillTimerDeps {
 
 /**
  * G14: one pending timer per project at most. A project is "due" when its instance is running, Kill is on, it is not
- * Held, has not been suspended by the adoption decision, and has no sessions. Becoming due arms the timer; ceasing to be
+ * Held, has not been suspended by the adoption decision, did not just fail to stop, and has no sessions. Becoming due arms the timer; ceasing to be
  * due (a tab opens, Kill goes off, the instance is Held, stops, crashes or never reached running) cancels it. When the
  * timer fires the conditions are checked again before the one `stop` call.
  *
@@ -60,7 +65,7 @@ export class KillTimer {
 
   private isDue(slug: string): boolean {
     const d = this.deps;
-    return d.stateOf(slug) === "running" && d.killOnClose(slug) === true && !d.isHeld(slug) && d.suspended?.(slug) !== true && d.sessionCount(slug) === 0;
+    return d.stateOf(slug) === "running" && d.killOnClose(slug) === true && !d.isHeld(slug) && d.suspended?.(slug) !== true && d.stopFailed?.(slug) !== true && d.sessionCount(slug) === 0;
   }
 
   /** Arm, keep or cancel the project's timer to match the rule. A timer already running is kept, not restarted. */

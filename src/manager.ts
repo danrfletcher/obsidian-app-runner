@@ -16,6 +16,8 @@ export class ProjectManager {
     private readonly onChanged: () => void = () => {},
     /** Called after a project's settings change (a toggle or an edit) so a running app's rules apply at once (G14). */
     private readonly onSettingsChanged: (slug: string) => void = () => {},
+    /** Called after a project is deleted so its open tabs can close (G3). */
+    private readonly onDeleted: (slug: string) => void = () => {},
   ) {}
 
   /** Register commands for every stored project and the global one. Called once at load. */
@@ -51,7 +53,7 @@ export class ProjectManager {
 
   /**
    * G3. A running project is only deleted after `confirmStopAndDelete` resolves true; the seam then stops it and
-   * removes its runtime files. Then its commands and its settings row go.
+   * removes its runtime files. Then its commands, its settings row and its open tabs go.
    */
   async delete(slug: string, confirmStopAndDelete: (project: Project) => Promise<boolean>): Promise<DeleteOutcome> {
     const project = this.store.get(slug);
@@ -61,6 +63,7 @@ export class ProjectManager {
     this.commands.unregister(slug);
     await this.store.remove(slug);
     this.onChanged();
+    this.onDeleted(slug);
     return "deleted";
   }
 }

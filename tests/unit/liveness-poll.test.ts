@@ -245,16 +245,20 @@ describe("an adopted app is watched because it is not our child (E21)", () => {
     expect(w.signals).toEqual([]);
   });
 
-  it("an app started in this session is not polled: its exit event is how we know", async () => {
+  it("an app started in this session is looked at by the member poll, not the adoption poll: it is not adopted and a death is its own exit", async () => {
     const w = new FakeWorld();
     const m = w.manager();
     const opening = m.open("live-captions");
     await w.clock.settle();
     w.serve(8957);
     await w.clock.run(opening);
+    expect(m.memberPollCount).toBe(1);
     w.psCalls.length = 0;
     await w.clock.advance(20_000);
-    expect(w.psCalls).toEqual([]);
+    // Each look names the recorded pids and the app's own group, nothing else (F14), and the app is still running.
+    expect(w.psCalls.length).toBeGreaterThan(0);
+    for (const call of w.psCalls) expect(call.pgids).toEqual([5000]);
+    expect(m.stateOf("live-captions")).toBe("running");
   });
 
   it("a ps look that fails does not end the app", async () => {

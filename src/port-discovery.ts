@@ -1,5 +1,8 @@
 import { execFile } from "node:child_process";
 
+/** How long one `ps` or `lsof` look may take before it is given up, so a hung tool cannot hold a start or a stop for ever. */
+export const SYSTEM_CALL_TIMEOUT_MS = 10_000;
+
 export interface Listener {
   pid: number;
   /** The address as lsof printed it: `127.0.0.1`, `[::1]`, `*`, `[::]` or another address. */
@@ -86,7 +89,7 @@ export const LSOF_ARGS = ["-nP", "-a", "-iTCP", "-sTCP:LISTEN", "-p"];
 export const realLsof: LsofRunner = (pids) =>
   new Promise((resolve, reject) => {
     if (pids.length === 0) return resolve("");
-    execFile("lsof", [...LSOF_ARGS, pids.join(",")], { maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+    execFile("lsof", [...LSOF_ARGS, pids.join(",")], { maxBuffer: 8 * 1024 * 1024, timeout: SYSTEM_CALL_TIMEOUT_MS }, (err, stdout) => {
       const code = (err as { code?: unknown } | null)?.code;
       if (err && code !== 1) reject(err);
       else resolve(stdout ?? "");

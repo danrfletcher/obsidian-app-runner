@@ -19,7 +19,11 @@ export async function readLogTail(fs: { readTail(file: string, bytes: number): P
   return lastLogLines(text, PANEL_LOG_LINES, NOTICE_LINE_MAX);
 }
 
-export type StoppedCause = "requested" | "crashed" | "not-running";
+/**
+ * Why the panel is up. `waiting` and `checking` are not stops: the app is running but has no web port yet (an app adopted
+ * mid-start), or the launch check for apps left running is not finished. Neither offers Start (there is nothing to start).
+ */
+export type StoppedCause = "requested" | "crashed" | "not-running" | "waiting" | "checking";
 
 export interface StoppedPanelModel {
   heading: string;
@@ -38,6 +42,11 @@ export function stoppedPanelModel(projectName: string | undefined, cause: Stoppe
       logLines: [],
       canStart: false,
     };
+  }
+  if (cause === "waiting" || cause === "checking") {
+    return cause === "waiting"
+      ? { heading: `Waiting for ${projectName}`, message: `${projectName} is running but has not opened a web port yet. This tab loads it as soon as it does.`, logLines: [...logLines], canStart: false }
+      : { heading: `Checking ${projectName}`, message: `Checking whether ${projectName} is still running from the last session.`, logLines: [], canStart: false };
   }
   const message =
     cause === "crashed" ? `${projectName} stopped on its own.` : cause === "requested" ? `${projectName} was stopped.` : `${projectName} is not running.`;

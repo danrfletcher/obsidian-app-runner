@@ -25,6 +25,7 @@ async function rig(kill: boolean) {
     sessionCount: (s) => sessions.count(s),
     stateOf: (s) => m.stateOf(s),
     isHeld: (s) => m.isHeld(s),
+    stopFailed: (s) => m.stopFailedOf(s),
     killOnClose: (s) => w.projects.get(s)?.killOnClose,
     stop: (s) => m.stop(s),
     onInstanceChange: (l) => m.subscribe((e) => l(e.slug)),
@@ -44,6 +45,16 @@ async function rig(kill: boolean) {
     closeTab() {
       leaves.splice(leaves.indexOf(first), 1);
       sessions.refresh();
+    },
+    /** A new tab, as the Open command makes after `open` answers `tab`. Returns the function that closes it. */
+    openTab() {
+      const t = tab();
+      leaves.push(t);
+      sessions.refresh();
+      return () => {
+        leaves.splice(leaves.indexOf(t), 1);
+        sessions.refresh();
+      };
     },
   };
 }
@@ -103,5 +114,49 @@ describe("G14 with the 15 s kill-on-close timer", () => {
       await r.w.clock.advance(ms);
       expect(r.m.stateOf(SLUG)).toBe("running");
     }
+  });
+});
+
+describe("a Stop the kill timer made that fails", () => {
+  const eperm = () => Object.assign(new Error("operation not permitted"), { code: "EPERM" });
+
+  it("is tried once: one signal attempt and one notice over two minutes, the app stays running", async () => {
+    const r = await rig(true);
+    r.w.killError = eperm();
+    r.w.notices.length = 0;
+    r.closeTab();
+    await r.w.clock.advance(2 * MINUTE);
+    expect(r.w.signals).toEqual([[-5000, "SIGTERM"]]);
+    expect(r.w.notices).toEqual(["Could not stop Live Captions: operation not permitted"]);
+    expect(r.m.stateOf(SLUG)).toBe("running");
+    expect(r.w.registry.entries.has(SLUG)).toBe(true);
+    expect(r.timer.pendingCount).toBe(0);
+  });
+
+  it("the user's own Stop afterwards still works and ends the app", async () => {
+    const r = await rig(true);
+    r.w.killError = eperm();
+    r.closeTab();
+    await r.w.clock.advance(MINUTE);
+    r.w.killError = null;
+    expect(await r.w.clock.run(r.m.stop(SLUG))).toBe("stopped");
+    expect(r.m.stateOf(SLUG)).toBe("none");
+  });
+
+  it("opening the app again lets a later close stop it once more", async () => {
+    const r = await rig(true);
+    r.w.killError = eperm();
+    r.closeTab();
+    await r.w.clock.advance(MINUTE);
+    expect(r.w.signals).toHaveLength(1);
+
+    r.w.killError = null;
+    expect((await r.w.clock.run(r.m.open(SLUG))).kind).toBe("tab");
+    const closeSecond = r.openTab();
+    expect(r.timer.isPending(SLUG)).toBe(false);
+    closeSecond();
+    expect(r.timer.isPending(SLUG)).toBe(true);
+    await r.w.clock.advance(GRACE_MS + 2000);
+    expect(r.m.stateOf(SLUG)).toBe("none");
   });
 });

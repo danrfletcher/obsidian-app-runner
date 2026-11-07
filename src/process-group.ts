@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import type { Clock } from "./clock";
+import { SYSTEM_CALL_TIMEOUT_MS } from "./port-discovery";
 
 /** One line of `ps -axo pid=,pgid=,lstart=`. `startTime` is the `lstart` text, kept as-is: it is only ever compared for equality. */
 export interface ProcRow {
@@ -85,7 +86,7 @@ export const realProcessTable: ProcessTable = {
     new Promise((resolve, reject) => {
       const args = scopedPsArgs(scope);
       if (!args) return resolve([]);
-      execFile("ps", args, { env: PS_ENV(), maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+      execFile("ps", args, { env: PS_ENV(), maxBuffer: 8 * 1024 * 1024, timeout: SYSTEM_CALL_TIMEOUT_MS }, (err, stdout) => {
         // ps exits 1 when none of the named processes exist: that is an empty answer, not a failure.
         const code = (err as { code?: unknown } | null)?.code;
         if (err && !(code === 1 && (stdout ?? "").trim() === "")) reject(err);

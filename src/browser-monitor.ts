@@ -16,6 +16,9 @@ export interface MonitorTarget {
   isHeld(slug: string): boolean;
   heldReasonOf(slug: string): string;
   setHeld(slug: string, held: boolean, reason?: string): void;
+  /** G12: whether the 30 s hold had ended, as saved with the Held flag. */
+  holdOverOf(slug: string): boolean;
+  setHoldOver(slug: string, over: boolean): void;
 }
 
 export interface BrowserMonitorDeps {
@@ -61,7 +64,9 @@ export class BrowserMonitor {
       intervalMs: deps.pollMs,
       read: async (slug) => {
         const port = deps.target.portOf(slug);
-        return port === null ? null : readBrowserTabs(deps.reader, port);
+        // No port yet (an adopted app that has not been rediscovered): its tabs cannot be matched, so the browser is
+        // unreadable for it. That holds the app instead of counting zero browser tabs and letting the kill timer stop it.
+        return port === null ? { kind: "error", message: "the app's port is not known yet" } : readBrowserTabs(deps.reader, port);
       },
       onResult: (slug, result) => this.onResult(slug, result),
     });
@@ -132,9 +137,10 @@ export class BrowserMonitor {
     }
     if (!watched) {
       const reason = t.heldReasonOf(slug);
+      // A Held app whose 30 s hold had already ended (it is Held only because the browser cannot be read) does not begin a new hold.
       const seq = new HoldSequencer(
         { clock: this.deps.clock, holdMs: this.deps.holdMs, onChange: () => this.sync(slug) },
-        { holding: t.isHeld(slug), problem: t.isHeld(slug) ? reason : null },
+        { holding: t.isHeld(slug) && !t.holdOverOf(slug), problem: t.isHeld(slug) ? reason : null },
       );
       this.watched.set(slug, { seq, announced: seq.problemReason, lastTabs: 0 });
     }
@@ -164,6 +170,7 @@ export class BrowserMonitor {
       watched.lastTabs = seq.tabs;
       this.emit(slug);
     }
+    this.deps.target.setHoldOver(slug, seq.holdPhase === "over");
     const reason = seq.heldReason;
     if (reason !== null) this.deps.target.setHeld(slug, true, reason);
     else if (this.deps.target.isHeld(slug)) this.deps.target.setHeld(slug, false);
