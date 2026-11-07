@@ -167,7 +167,7 @@ export class Adoption {
       if (this.disposed) return;
     }
 
-    const due = (slug: string) => this.deps.killOnClose(slug) === true && this.deps.sessionCount(slug) === 0;
+    const due = (slug: string) => this.deps.killOnClose(slug) === true && this.deps.sessionCount(slug) === 0 && !target.isHeld(slug);
     const candidates = [...this.pending].filter(due);
     if (candidates.length > 0) {
       await this.wait(this.deps.graceMs ?? ADOPT_GRACE_MS);
@@ -183,11 +183,12 @@ export class Adoption {
         continue;
       }
       const noTab = this.deps.sessionCount(slug) === 0;
-      if (candidates.includes(slug) && due(slug) && !target.isHeld(slug)) {
+      if (candidates.includes(slug) && due(slug)) {
         await target.stop(slug, { silent: true }).catch(() => undefined);
         if (this.disposed) return;
         (target.stateOf(slug) === "none" ? stopped : stillRunning).push(name);
-      } else if (noTab && this.deps.killOnClose(slug) !== true) {
+      } else if (noTab && (this.deps.killOnClose(slug) !== true || target.isHeld(slug))) {
+        // Kill off, or Held (G12: opened in the browser, stops only on Stop): named as still running, never stopped here.
         stillRunning.push(name);
       }
       this.settle(slug);

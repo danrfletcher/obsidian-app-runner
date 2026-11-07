@@ -78,10 +78,34 @@ export type ViewStateResult = Record<string, unknown>;
 
 export class ItemView {
   contentEl = new FakeNode("div");
+  /** Header actions added with `addAction`: what a user would see as buttons in the tab header. */
+  actions: Array<{ icon: string; title: string; click: () => void }> = [];
   constructor(public leaf: WorkspaceLeaf) {}
   async setState(_state: unknown, _result: ViewStateResult): Promise<void> {}
   async onOpen(): Promise<void> {}
   async onClose(): Promise<void> {}
+  addAction(icon: string, title: string, callback: () => void): FakeNode {
+    this.actions.push({ icon, title, click: callback });
+    return new FakeNode("div");
+  }
+  onPaneMenu(_menu: unknown, _source: string): void {}
+}
+
+/** A menu that records its items, so a test can read the titles and click one. */
+export class FakeMenu {
+  items: Array<{ title: string; icon: string; section: string; click: () => void }> = [];
+  addItem(cb: (item: unknown) => unknown): this {
+    const item = { title: "", icon: "", section: "", click: () => {} };
+    const api = {
+      setTitle: (t: string) => ((item.title = t), api),
+      setIcon: (i: string) => ((item.icon = i), api),
+      setSection: (s: string) => ((item.section = s), api),
+      onClick: (fn: () => void) => ((item.click = fn), api),
+    };
+    cb(api);
+    this.items.push(item);
+    return this;
+  }
 }
 
 export class Modal {

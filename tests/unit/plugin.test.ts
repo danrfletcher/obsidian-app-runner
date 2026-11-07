@@ -236,11 +236,11 @@ describe("the commands in this PR", () => {
     workspace.activeView = new AppRunnerView(new WorkspaceLeaf() as never, {
       getProject: () => undefined,
       isWebviewAvailable: () => true,
-      openExternal() {},
+      async openExternal() {},
       notify() {},
     });
     plugin.commands.get(POP_OUT_COMMAND_ID)!.callback!();
-    expect(Notice.messages).toHaveLength(1);
-    expect(Notice.messages[0]).not.toMatch(/not an App Runner tab/);
+    // Pop out is real now (tests/unit/popout-command.test.ts); this tab has no project, so it does nothing, and says nothing wrong.
+    expect(Notice.messages.filter((m) => /not an App Runner tab/.test(m))).toEqual([]);
   });
 });

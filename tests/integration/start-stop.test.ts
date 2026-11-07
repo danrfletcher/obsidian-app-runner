@@ -70,7 +70,7 @@ function setup(command: string, over: Partial<InstanceDeps> = {}, projectOver = 
     getProject: () => p,
     runtimeDir: runtime,
     notify: (n) => void notices.push(n),
-    openExternal: () => {},
+    openExternal: async () => {},
     pickPort: async (_p, ports) => ports[0],
     rememberUrl: async () => {},
     fs: realRuntimeFs,

@@ -1,10 +1,13 @@
-import { ItemView, type ViewStateResult, type WorkspaceLeaf } from "obsidian";
-import type { InstanceEvent } from "./instance";
+import { ItemView, type Menu, type ViewStateResult, type WorkspaceLeaf } from "obsidian";
+import type { InstanceEvent, PopOutOutcome } from "./instance";
 import type { Project } from "./project";
 import { stoppedPanelModel, type StoppedCause } from "./stopped-panel";
 import { isLoopbackUrl } from "./validation";
 
 export const VIEW_TYPE_APP = "app-runner-view";
+
+const POP_OUT_TITLE = "Pop out to browser";
+const POP_OUT_ICON = "external-link";
 
 /** What the tab needs from the plugin. */
 export interface ViewHost {
@@ -12,8 +15,10 @@ export interface ViewHost {
   isWebviewAvailable(): boolean;
   /** The loopback URL of the project's running app, or undefined when it is not running. */
   instanceUrl?(slug: string): string | undefined;
-  /** Open a URL in the default browser. */
-  openExternal(url: string): void;
+  /** Open a URL in the default browser. Only the fallback for a host that has no `popOut`. */
+  openExternal(url: string): Promise<void>;
+  /** G12: hand the running app to the default browser and hold it. The tab closes only when the outcome is `opened`. */
+  popOut?(slug: string): Promise<PopOutOutcome>;
   notify(message: string): void;
   /** Hear about instances changing and ending (G8, G9). Returns the unsubscribe. */
   subscribe?(listener: (event: InstanceEvent) => void): () => void;
@@ -72,6 +77,8 @@ export class AppRunnerView extends ItemView {
   private unsubscribe: (() => void) | null = null;
   /** Bumped by every render, so a panel waiting for the log does not draw over a newer page. */
   private renderToken = 0;
+  /** True while a Pop out is waiting on the instance, so a second click opens nothing more. */
+  private poppingOut = false;
   /** True while the panel's Start is running, so a second click starts nothing. */
   private starting = false;
 
@@ -97,6 +104,34 @@ export class AppRunnerView extends ItemView {
 
   async onOpen(): Promise<void> {
     this.listen();
+    // G12: the header action. The tab menu item is added in `onPaneMenu`.
+    if (this.host.popOut) this.addAction(POP_OUT_ICON, POP_OUT_TITLE, () => void this.popOut());
+  }
+
+  onPaneMenu(menu: Menu, source: string): void {
+    super.onPaneMenu(menu, source);
+    if (!this.host.popOut) return;
+    menu.addItem((item) => item.setTitle(POP_OUT_TITLE).setIcon(POP_OUT_ICON).setSection("action").onClick(() => void this.popOut()));
+  }
+
+  /**
+   * G12: Pop out to browser. The instance gives the browser its URL, read now, and becomes Held; only then does this tab
+   * close, so a browser that could not be opened leaves the tab where it is. Other tabs of the app are not touched. A
+   * second click while the first is pending does nothing (E17). Returns whether the tab was closed.
+   */
+  async popOut(): Promise<boolean> {
+    if (this.poppingOut || !this.host.popOut || this.slug === "") return false;
+    this.poppingOut = true;
+    try {
+      const outcome = await this.host.popOut(this.slug);
+      if (outcome.kind !== "opened") return false;
+      this.leaf.detach();
+      return true;
+    } catch {
+      return false;
+    } finally {
+      this.poppingOut = false;
+    }
   }
 
   async onClose(): Promise<void> {
@@ -160,8 +195,20 @@ export class AppRunnerView extends ItemView {
     if (!this.host.isWebviewAvailable()) {
       // E18: nothing is rendered; the page opens in the default browser and the tab closes.
       this.mode = "message";
-      this.host.notify(`This Obsidian window cannot embed web pages (webview is unavailable), so ${project.name} opened in your default browser instead.`);
-      this.host.openExternal(url);
+      const notice = `This Obsidian window cannot embed web pages (webview is unavailable), so ${project.name} opened in your default browser instead.`;
+      if (this.host.popOut) {
+        // The Held path (G12): the same hand-off as Pop out. If the browser could not be opened, that notice has said so and the tab stays.
+        if (await this.popOut()) this.host.notify(notice);
+        else this.showMessage(`This Obsidian window cannot embed web pages, so ${project.name} cannot be shown in this tab.`);
+        return;
+      }
+      try {
+        await this.host.openExternal(url);
+      } catch (e) {
+        this.showMessage(`${project.name} could not be opened in your default browser: ${e instanceof Error ? e.message : String(e)}`);
+        return;
+      }
+      this.host.notify(notice);
       this.leaf.detach();
       return;
     }

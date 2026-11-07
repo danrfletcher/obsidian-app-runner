@@ -1,4 +1,6 @@
 import type { Clock } from "./clock";
+import { checkBrowserUrl } from "./browser-url";
+import { HELD_OPENED_IN_BROWSER } from "./held";
 import type { HttpGet } from "./loopback-http";
 import { LivenessPoll, type LivenessVerdict } from "./liveness-poll";
 import { choosePort, loopbackCandidates, parseLsof, type Answer, type LsofRunner } from "./port-discovery";
@@ -32,6 +34,13 @@ export type OpenOutcome =
   | { kind: "missing" };
 
 export type StopResult = "nothing" | "stopped" | "cancelled" | "waited";
+
+/**
+ * G12: what Pop out to browser did. `opened`: the browser was given the URL once and the instance is Held, so the
+ * caller closes its tab. Every other kind leaves the tab alone: the app is not running (E13), the start was cancelled or
+ * failed (E17), or the browser could not be given a URL (a notice said why; Held is not set and the app keeps running).
+ */
+export type PopOutOutcome = { kind: "opened"; url: string } | { kind: "not-running" } | { kind: "cancelled" } | { kind: "failed" };
 
 /** Why an instance went away: a Stop (or cancelled start, or unload), the app exiting on its own, or a start that failed. */
 export type EndCause = "requested" | "crashed" | "start-failed";
@@ -80,13 +89,16 @@ interface Instance {
   stopped: Promise<void> | null;
   /** Why the instance will end, if it ends through the stop path. A Stop is the default; a failed start says so. */
   endCause: EndCause;
-  /** Held instances are never auto-stopped (G14). Set by whoever holds it; this PR only reads it. */
+  /** Held instances are never auto-stopped (G14). Set when the app is opened in the browser (G12); only Stop, a crash or delete ends it. */
   held: boolean;
+  /** Why it is Held, as a short code (`held.ts`). Empty when not Held. */
   heldReason: string;
   /** G10: found in the registry at launch. It is not our child, so only the 5 s liveness poll can tell that it died. */
   adopted: boolean;
-  /** G13: persisted in the registry so the browser poll can resume at relaunch. This PR only stores it. */
+  /** G13: persisted in the registry so the browser poll can resume at relaunch. Set when the app is opened in the browser. */
   browserSessionExpected: boolean;
+  /** G12, E17: a Pop out waiting for the start to finish or just running; a second one joins it instead of opening a second page. */
+  popOutPending: Promise<PopOutOutcome> | null;
 }
 
 export interface InstanceDeps {
@@ -94,8 +106,8 @@ export interface InstanceDeps {
   /** `~/Library/Application Support/Obsidian App Runner/<vault key>/`. */
   runtimeDir: string;
   notify(message: string): void;
-  /** Hand a loopback URL to the default browser. */
-  openExternal(url: string): void;
+  /** Hand a loopback URL to the default browser. The only external action (F8); it is called only after `checkBrowserUrl`. */
+  openExternal(url: string): Promise<void>;
   /** E3: ask which of several HTML ports to use. null when dismissed or cancelled. */
   pickPort(project: Project, ports: number[], signal: AbortSignal): Promise<number | null>;
   /** E3: remember a picked port as the project's URL override, through the settings registry. */
@@ -213,13 +225,18 @@ export class InstanceManager implements RuntimeSeams {
     return this.instances.get(slug)?.held ?? false;
   }
 
-  /** Mark an instance Held (with the reason shown in the running list) or release it. Does nothing when nothing runs. */
+  /**
+   * Mark an instance Held (with the reason shown in the running list) or release it. Does nothing when nothing runs.
+   * The flag and reason are saved in the registry entry, so a relaunch adopts the app still Held (G12). Only the holder
+   * calls this with `false`; no timer in this plugin does.
+   */
   setHeld(slug: string, held: boolean, reason = ""): void {
     const inst = this.instances.get(slug);
     if (!inst || (inst.held === held && inst.heldReason === (held ? reason : ""))) return;
     inst.held = held;
     inst.heldReason = held ? reason : "";
     this.emit({ type: "changed", slug });
+    void this.persist(slug);
   }
 
   /** G13: whether a browser session is expected for the app; saved in the registry so it survives a relaunch. */
@@ -290,13 +307,79 @@ export class InstanceManager implements RuntimeSeams {
     }
   }
 
-  /** A ready app: a tab, or the browser when Open-in-browser is on (read now, so the toggle applies at once). */
-  private arrive(slug: string, url: string): OpenOutcome {
+  /**
+   * A ready app: a tab, or the browser when Open-in-browser is on (read now, so the toggle applies at once). The browser
+   * path is the same hand-off as Pop out (G12): the URL is checked, opened once, and the instance becomes Held. If the
+   * browser cannot be given the URL the outcome is `failed`: a notice said why, no tab opens, nothing is Held, and the
+   * app keeps running.
+   */
+  private async arrive(slug: string, url: string): Promise<OpenOutcome> {
     if (this.deps.getProject(slug)?.openInBrowser) {
-      if (isLoopbackUrl(url)) this.deps.openExternal(url);
-      return { kind: "browser", url };
+      return (await this.handOffToBrowser(slug, url)) ? { kind: "browser", url } : { kind: "failed" };
     }
     return { kind: "tab", url };
+  }
+
+  /**
+   * G12, F6, F8: give the default browser the instance's URL, then hold the instance. The URL is opened exactly as it
+   * is (no query, fragment, relay or rewritten host); anything that is not an http(s) loopback URL is refused with a
+   * notice before the opener is called. An opener that throws, or whose promise rejects, also gets a notice. In both
+   * cases nothing is Held: Held is set only after the opener has resolved.
+   * Held is set only here, only for a running instance, with the one reason this PR has.
+   */
+  private async handOffToBrowser(slug: string, url: string | null): Promise<boolean> {
+    const inst = this.instances.get(slug);
+    const name = this.deps.getProject(slug)?.name ?? inst?.project.name ?? slug;
+    const checked = checkBrowserUrl(url);
+    if (!checked.ok) {
+      this.deps.notify(
+        checked.problem === "none"
+          ? `${name} ${checked.message}. Try again in a moment.`
+          : `App Runner only opens loopback addresses in the browser, so ${name} was not opened. ${checked.message}.`,
+      );
+      return false;
+    }
+    try {
+      await this.deps.openExternal(checked.url);
+    } catch (e) {
+      this.deps.notify(`Could not open ${name} in your browser: ${e instanceof Error ? e.message : String(e)}`);
+      return false;
+    }
+    // The await above can span a Stop or a crash: only the same instance, still running, becomes Held.
+    if (inst && this.instances.get(slug) === inst && inst.state === "running") {
+      inst.browserSessionExpected = true; // G13: saved with the Held flag by the same registry write
+      this.setHeld(slug, true, HELD_OPENED_IN_BROWSER);
+    }
+    return true;
+  }
+
+  /**
+   * G12: Pop out to browser. Reads the instance's URL now, gives it to the browser once and holds the instance; the
+   * caller then closes its tab (other tabs of the app stay). Pop out while the app is still starting joins the start and
+   * opens the browser when it is ready; a Stop in between cancels it and nothing opens (E17). A second Pop out while one is
+   * pending joins it, so a double click opens one page and sets one flag. With nothing running (a restored App stopped
+   * panel, E13) nothing opens and nothing is Held.
+   */
+  popOut(slug: string): Promise<PopOutOutcome> {
+    const inst = this.instances.get(slug);
+    if (!inst || inst.state === "stopping") {
+      this.deps.notify(`${this.deps.getProject(slug)?.name ?? slug} is not running, so there is nothing to open in the browser.`);
+      return Promise.resolve({ kind: "not-running" });
+    }
+    if (inst.popOutPending) return inst.popOutPending;
+    const run = async (): Promise<PopOutOutcome> => {
+      if (inst.state === "starting") {
+        const started = await inst.ready;
+        if (started.kind !== "ready") return { kind: "cancelled" };
+      }
+      if (this.instances.get(slug) !== inst || inst.state !== "running") return { kind: "cancelled" };
+      return (await this.handOffToBrowser(slug, inst.url)) ? { kind: "opened", url: inst.url! } : { kind: "failed" };
+    };
+    const pending: Promise<PopOutOutcome> = run().finally(() => {
+      if (inst.popOutPending === pending) inst.popOutPending = null;
+    });
+    inst.popOutPending = pending;
+    return pending;
   }
 
   private beginStart(project: Project): Promise<OpenOutcome> {
@@ -328,12 +411,13 @@ export class InstanceManager implements RuntimeSeams {
       heldReason: "",
       adopted: false,
       browserSessionExpected: false,
+      popOutPending: null,
     };
     this.instances.set(project.slug, inst);
     this.deps.notify(`Starting ${project.name}`);
     this.emit({ type: "changed", slug: project.slug });
     void this.runStart(inst);
-    return ready.then((r): OpenOutcome => (r.kind === "ready" ? this.arrive(project.slug, r.url) : { kind: r.kind }));
+    return ready.then((r): OpenOutcome | Promise<OpenOutcome> => (r.kind === "ready" ? this.arrive(project.slug, r.url) : { kind: r.kind }));
   }
 
   private async runStart(inst: Instance): Promise<void> {
@@ -408,7 +492,7 @@ export class InstanceManager implements RuntimeSeams {
   }
 
   private entryOf(inst: Instance): RegistryEntry {
-    return {
+    const entry: RegistryEntry = {
       slug: inst.slug,
       pid: inst.pgid,
       pgid: inst.pgid,
@@ -417,6 +501,11 @@ export class InstanceManager implements RuntimeSeams {
       startedAt: inst.startedAt,
       browserSessionExpected: inst.browserSessionExpected,
     };
+    if (inst.held) {
+      entry.held = true;
+      entry.heldReason = inst.heldReason;
+    }
+    return entry;
   }
 
   /**
@@ -562,10 +651,11 @@ export class InstanceManager implements RuntimeSeams {
       resolveReady: () => undefined,
       stopped: null,
       endCause: "requested",
-      held: false,
-      heldReason: "",
+      held: entry.held === true,
+      heldReason: entry.held === true ? (entry.heldReason ?? "") : "",
       adopted: true,
       browserSessionExpected: entry.browserSessionExpected,
+      popOutPending: null,
     };
     this.instances.set(entry.slug, inst);
     this.liveness.watch(entry.slug);

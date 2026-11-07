@@ -36,15 +36,17 @@ export function registryProblemNotice(problem: RegistryProblem, movedTo: string 
 }
 
 /** Open a URL in the default browser: Electron's shell when reachable, else the window opener (Obsidian hands it to the OS). */
-function openExternal(url: string): void {
+async function openExternal(url: string): Promise<void> {
+  let shell: { openExternal(u: string): unknown } | undefined;
   try {
-    const electron = (window as unknown as { require?: (m: string) => { shell?: { openExternal(u: string): unknown } } }).require?.("electron");
-    if (electron?.shell) {
-      void electron.shell.openExternal(url);
-      return;
-    }
+    shell = (window as unknown as { require?: (m: string) => { shell?: { openExternal(u: string): unknown } } }).require?.("electron")?.shell;
   } catch {
-    // fall through to window.open
+    // electron is not reachable: fall through to window.open
+  }
+  if (shell) {
+    // Electron reports a failure by rejecting; awaiting it lets the caller see it (no Held, tab stays, a notice).
+    await shell.openExternal(url);
+    return;
   }
   window.open(url, "_blank");
 }
@@ -172,6 +174,7 @@ export default class AppRunnerPlugin extends Plugin {
       sessionsChanged: () => this.sessions.refresh(),
       isWebviewAvailable: () => isWebviewAvailable(),
       openExternal,
+      popOut: (slug) => this.instances.popOut(slug),
       notify: (m) => new Notice(m),
     };
     this.registerView(VIEW_TYPE_APP, (leaf) => new AppRunnerView(leaf, viewHost));
@@ -252,14 +255,17 @@ export default class AppRunnerPlugin extends Plugin {
     await this.instances.stop(slug);
   }
 
-  /** Pop out arrives in a later update; off an App Runner tab it only says so. */
+  /**
+   * G4, G12: the global Pop out command. On an App Runner tab it does what the tab's own Pop out does (the browser opens
+   * once, the instance is Held, only this tab closes). Off one it only says so.
+   */
   popOutCurrentTab(): void {
     const view = this.app.workspace.getActiveViewOfType(AppRunnerView);
     if (!view) {
       new Notice("The active tab is not an App Runner tab.");
       return;
     }
-    new Notice("Pop out to browser arrives with a later App Runner update.");
+    void view.popOut();
   }
 
   private refreshTabTitles(): void {

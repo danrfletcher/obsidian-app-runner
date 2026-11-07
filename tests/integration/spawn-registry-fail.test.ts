@@ -71,7 +71,7 @@ function manager(runtime: string, registry: RegistryStore) {
     getProject: () => project({ folder: path.join(tmp, "work"), command: "sleep 300 & exec sleep 301" }),
     runtimeDir: runtime,
     notify: (n) => void notices.push(n),
-    openExternal: () => {},
+    openExternal: async () => {},
     pickPort: async (_p, ports) => ports[0],
     rememberUrl: async () => {},
     fs: realRuntimeFs,

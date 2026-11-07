@@ -71,7 +71,7 @@ function session(runtime: string, killOnClose: boolean) {
     getProject: () => p,
     runtimeDir: runtime,
     notify: (n) => void notices.push(n),
-    openExternal: () => {},
+    openExternal: async () => {},
     pickPort: async (_p, ports) => ports[0],
     rememberUrl: async () => {},
     fs: realRuntimeFs,

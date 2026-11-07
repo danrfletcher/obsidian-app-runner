@@ -1,4 +1,5 @@
 import type { InstanceInfo, InstanceState } from "./instance";
+import { heldReasonText } from "./held";
 
 /** G7: how a row says the app outlived the last Obsidian session. */
 export const STILL_RUNNING_TEXT = "Still running from last session";
@@ -43,10 +44,11 @@ export function tabsText(count: number): string {
   return `${count} ${count === 1 ? "tab" : "tabs"}`;
 }
 
-/** The sessions cell: a Held instance says Held and why; otherwise the count of Obsidian tabs. */
+/** The sessions cell: a Held instance says Held and why (the reason code worded by `heldReasonText`); otherwise the count of Obsidian tabs. */
 export function sessionsText(info: Pick<InstanceInfo, "held" | "heldReason">, count: number): string {
   if (!info.held) return tabsText(count);
-  return info.heldReason.trim() === "" ? "Held" : `Held: ${info.heldReason.trim()}`;
+  const reason = heldReasonText(info.heldReason);
+  return reason === "" ? "Held" : `Held: ${reason}`;
 }
 
 /**

@@ -1,5 +1,6 @@
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
+import { MAX_HELD_REASON_LENGTH } from "./held";
 import { isOwned, MAX_PID, type Member, type ProcRow } from "./process-group";
 
 /** What is recorded about a running app so Stop only ever signals a group the plugin itself started (F11). */
@@ -18,6 +19,13 @@ export interface RegistryEntry {
    * saved so that at relaunch the browser poll resumes before any stop decision. This PR only persists it.
    */
   browserSessionExpected: boolean;
+  /**
+   * G12: the instance is Held (never auto-stopped) and `heldReason` says why, as a short code (see `held.ts`). Both are
+   * written only while the instance is Held, so an entry of a free app has neither and an older file reads unchanged.
+   * A relaunch adopts the app still Held, with the same reason.
+   */
+  held?: boolean;
+  heldReason?: string;
 }
 
 export const REGISTRY_VERSION = 1;
@@ -74,7 +82,7 @@ export function parseEntry(v: unknown): RegistryEntry | null {
   }
   const portOk = port === null || port === undefined || (Number.isInteger(port) && (port as number) >= 1 && (port as number) <= 65535);
   if (!portOk) return null;
-  return {
+  const entry: RegistryEntry = {
     slug,
     pid,
     pgid,
@@ -83,6 +91,11 @@ export function parseEntry(v: unknown): RegistryEntry | null {
     startedAt: typeof startedAt === "number" && Number.isFinite(startedAt) ? startedAt : 0,
     browserSessionExpected: v.browserSessionExpected === true,
   };
+  if (v.held === true) {
+    entry.held = true;
+    entry.heldReason = typeof v.heldReason === "string" ? v.heldReason.trim().slice(0, MAX_HELD_REASON_LENGTH) : "";
+  }
+  return entry;
 }
 
 /**

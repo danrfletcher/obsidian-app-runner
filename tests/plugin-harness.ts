@@ -36,14 +36,27 @@ export async function launch(world: FakeWorld, opts: LaunchOptions = {}) {
   }
   const handlers = new Map<string, () => void>();
   let layoutReady: (() => void) | undefined;
+  /** As in Obsidian, detaching a leaf takes it out of the workspace and the layout changes. */
+  const attached = (l: WorkspaceLeaf): WorkspaceLeaf => {
+    l.detach = () => {
+      l.detached = true;
+      const at = leaves.indexOf(l);
+      if (at >= 0) leaves.splice(at, 1);
+      handlers.get("layout-change")?.();
+    };
+    return l;
+  };
+  for (const l of leaves) attached(l);
   const workspace = {
+    /** The view Obsidian reports as the active tab; tests set it. */
+    activeView: null as unknown,
     getLeaf: () => {
-      const l = new WorkspaceLeaf();
+      const l = attached(new WorkspaceLeaf());
       leaves.push(l);
       return l;
     },
     revealLeaf: async () => {},
-    getActiveViewOfType: () => null,
+    getActiveViewOfType: (cls: new (...a: never[]) => unknown) => (workspace.activeView instanceof cls ? workspace.activeView : null),
     getLeavesOfType: (type: string) => leaves.filter((l) => l.viewState?.type === type),
     on: (name: string, cb: () => void) => {
       handlers.set(name, cb);
@@ -62,6 +75,7 @@ export async function launch(world: FakeWorld, opts: LaunchOptions = {}) {
   return {
     plugin,
     leaves,
+    workspace,
     tab,
     layoutChange: () => handlers.get("layout-change")!(),
     /** Obsidian has restored its layout. */

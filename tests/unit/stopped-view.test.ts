@@ -29,7 +29,7 @@ function world() {
   const host: ViewHost = {
     getProject: (s) => projects.get(s),
     isWebviewAvailable: () => true,
-    openExternal: () => {},
+    openExternal: async () => {},
     notify: () => {},
     instanceUrl: () => url,
     subscribe: (l) => {

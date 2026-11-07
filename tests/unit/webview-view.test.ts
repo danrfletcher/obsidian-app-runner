@@ -21,7 +21,7 @@ function setup(projects: Project[], webview = true) {
   const host: ViewHost = {
     getProject: (s) => byslug.get(s),
     isWebviewAvailable: () => webview,
-    openExternal: (u) => opened.push(u),
+    openExternal: async (u) => void opened.push(u),
     notify: (m) => notices.push(m),
   };
   const leaf = new WorkspaceLeaf();
@@ -136,6 +136,18 @@ describe("E18 webview unavailable", () => {
     expect(notices[0]).toMatch(/webview is unavailable/);
     expect(notices[0]).toMatch(/Live Captions/);
     expect(leaf.detached).toBe(true);
+  });
+
+  it("a browser that cannot be opened (the promise rejects): the tab stays, says so, and the 'opened in your browser' notice is not shown", async () => {
+    const { view, leaf, host, notices } = setup([project({ urlOverride: "http://localhost:8957/x" })], false);
+    host.openExternal = async () => {
+      await Promise.resolve();
+      throw new Error("no default browser");
+    };
+    await view.setState({ slug: "live-captions" }, RESULT);
+    expect(leaf.detached).toBe(false);
+    expect(notices).toEqual([]);
+    expect(dom(view).textContent()).toBe("Live Captions could not be opened in your default browser: no default browser");
   });
 
   it("with the webview available nothing is opened externally and the tab stays", async () => {

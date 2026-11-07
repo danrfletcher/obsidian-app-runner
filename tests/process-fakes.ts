@@ -191,7 +191,7 @@ export class FakeWorld {
       getProject: (slug) => this.projects.get(slug),
       runtimeDir: RUNTIME,
       notify: (m) => void this.notices.push(m),
-      openExternal: (u) => void this.external.push(u),
+      openExternal: async (u) => void this.external.push(u),
       pickPort: async (_p, ports) => {
         this.pickerCalls.push(ports);
         return this.pickerAnswer;
