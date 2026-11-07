@@ -104,11 +104,11 @@ describe("the tab is a webview, not an iframe (G11)", () => {
     }
   });
 
-  it("with no running app and no override it says so and renders no webview", async () => {
+  it("with no running app and no override it shows the App stopped panel (it replaced the old plain message) and renders no webview", async () => {
     const { view } = setup([project({ urlOverride: "" })]);
     await view.setState({ slug: "live-captions" }, RESULT);
     expect(dom(view).all().some((e) => e.tag === "webview")).toBe(false);
-    expect(dom(view).textContent()).toBe('Live Captions is not running. Run "Open Live Captions" from the command palette to start it.');
+    expect(dom(view).textContent()).toBe("App stopped\nLive Captions is not running.");
   });
 
   it("a deleted project shows a message", async () => {

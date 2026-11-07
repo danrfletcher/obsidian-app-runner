@@ -14,6 +14,8 @@ export class ProjectManager {
     private readonly notify: (message: string) => void,
     /** Called after a rename so open tabs can refresh their title. */
     private readonly onChanged: () => void = () => {},
+    /** Called after a project's settings change (a toggle or an edit) so a running app's rules apply at once (G14). */
+    private readonly onSettingsChanged: (slug: string) => void = () => {},
   ) {}
 
   /** Register commands for every stored project and the global one. Called once at load. */
@@ -38,11 +40,13 @@ export class ProjectManager {
       this.notify(`${result.project.name} is running: the new folder, command or URL applies the next time it starts.`);
     }
     this.onChanged();
+    this.onSettingsChanged(slug);
     return result;
   }
 
   async setToggle(slug: string, key: "killOnClose" | "openInBrowser", value: boolean): Promise<void> {
     await this.store.setToggle(slug, key, value);
+    this.onSettingsChanged(slug);
   }
 
   /**

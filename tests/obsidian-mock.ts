@@ -19,6 +19,8 @@ export class FakeNode {
   text = "";
   cls?: string;
   attrs: Record<string, string> = {};
+  /** Settings drawn into this element since it was last emptied: what a user would see there now. */
+  settings: Setting[] = [];
   private listeners: Record<string, Array<() => void>> = {};
   constructor(public tag: string) {}
   createEl(tag: string, o: { text?: string; cls?: string } = {}): FakeNode {
@@ -39,6 +41,7 @@ export class FakeNode {
   }
   empty(): void {
     this.children = [];
+    this.settings = [];
     this.text = "";
   }
   addEventListener(name: string, fn: () => void): void {
@@ -58,8 +61,13 @@ export class FakeNode {
 export class WorkspaceLeaf {
   viewState: { type?: string; state?: unknown } | null = null;
   detached = false;
+  /** The view this leaf holds, when a test attaches one. */
+  view: unknown = null;
   async setViewState(s: { type: string; state?: unknown }): Promise<void> {
     this.viewState = s;
+  }
+  getViewState(): { type?: string; state?: unknown } {
+    return this.viewState ?? {};
   }
   detach(): void {
     this.detached = true;
@@ -72,6 +80,8 @@ export class ItemView {
   contentEl = new FakeNode("div");
   constructor(public leaf: WorkspaceLeaf) {}
   async setState(_state: unknown, _result: ViewStateResult): Promise<void> {}
+  async onOpen(): Promise<void> {}
+  async onClose(): Promise<void> {}
 }
 
 export class Modal {
@@ -134,6 +144,7 @@ export class Setting {
   buttons: MockControl[] = [];
   constructor(public containerEl: unknown) {
     Setting.all.push(this);
+    if (containerEl instanceof FakeNode) containerEl.settings.push(this);
   }
   setName(n: string): this {
     this.name = n;
@@ -200,6 +211,7 @@ export class Plugin {
   removeCommand(id: string): void {
     this.commands.delete(id);
   }
+  registerEvent(): void {}
   registerView(type: string, creator: unknown): void {
     this.views.set(type, creator);
   }

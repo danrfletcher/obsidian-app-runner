@@ -20,6 +20,14 @@ export class FakeClock implements Clock {
     return new Promise((resolve) => this.timers.push({ at: this.t + Math.max(0, ms), resolve }));
   }
 
+  after(ms: number, fn: () => void): () => void {
+    const timer = { at: this.t + Math.max(0, ms), resolve: fn };
+    this.timers.push(timer);
+    return () => {
+      this.timers = this.timers.filter((x) => x !== timer);
+    };
+  }
+
   get pendingTimers(): number {
     return this.timers.length;
   }

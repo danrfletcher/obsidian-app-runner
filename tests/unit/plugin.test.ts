@@ -19,7 +19,9 @@ function makePlugin() {
     },
     revealLeaf: async () => {},
     getActiveViewOfType: (cls: new (...a: never[]) => unknown) => (workspace.activeView instanceof cls ? workspace.activeView : null),
-    getLeavesOfType: () => [] as unknown[],
+    getLeavesOfType: () => leaves,
+    on: () => ({}),
+    onLayoutReady: () => {},
   };
   // The vault adapter as the plugin's data.json sees it: the file is there once the mock has stored something.
   const copies: Array<[string, string]> = [];

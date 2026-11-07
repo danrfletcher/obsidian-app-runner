@@ -2,6 +2,7 @@ import { Modal, PluginSettingTab, Setting, type App, type Plugin } from "obsidia
 import type { ProjectManager } from "./manager";
 import { ProjectForm } from "./project-form";
 import type { Project } from "./project";
+import { rowSummary, type RunningRow } from "./running-list-model";
 import type { SettingsStore } from "./settings-store";
 import type { LogActions } from "./show-log";
 import type { FieldErrors } from "./validation";
@@ -38,8 +39,23 @@ export class ConfirmStopDeleteModal extends Modal {
   }
 }
 
+/** What the running list (G7) needs from the plugin. */
+export interface RunningListHost {
+  /** The rows as they are now. */
+  rows(): RunningRow[];
+  /** Hear about any instance or session-count change. Returns the unsubscribe. */
+  subscribe(listener: () => void): () => void;
+  open(slug: string): void;
+  stop(slug: string): void;
+  showLog(slug: string): void;
+}
+
+export const NO_RUNNING_APPS_TEXT = "No apps are running.";
+
 export class AppRunnerSettingTab extends PluginSettingTab {
   private readonly form: ProjectForm;
+  private runningEl: HTMLElement | null = null;
+  private unsubscribeRunning: (() => void) | null = null;
 
   constructor(
     app: App,
@@ -48,6 +64,8 @@ export class AppRunnerSettingTab extends PluginSettingTab {
     private readonly manager: ProjectManager,
     /** Show log (G17). Without it the button is shown disabled. */
     private readonly logs?: LogActions,
+    /** The running list (G7). Without it the section is not shown. */
+    private readonly running?: RunningListHost,
   ) {
     super(app, plugin);
     this.form = new ProjectForm(manager);
@@ -55,13 +73,51 @@ export class AppRunnerSettingTab extends PluginSettingTab {
 
   display(): void {
     const { containerEl } = this;
+    this.stopWatching();
     containerEl.empty();
+    if (this.running) {
+      new Setting(containerEl).setName("Running apps").setHeading();
+      this.runningEl = containerEl.createDiv();
+      this.renderRunning();
+      // Only this section is redrawn on a change, so a half-typed form below keeps its text and focus.
+      this.unsubscribeRunning = this.running.subscribe(() => this.renderRunning());
+    }
     new Setting(containerEl).setName("Projects").setHeading();
     if (this.store.projects.length === 0) {
       containerEl.createDiv({ cls: "setting-item-description", text: "No projects yet. Add one below." });
     }
     for (const project of this.store.projects) this.renderRow(project);
     this.renderForm();
+  }
+
+  /** Obsidian calls this when the settings tab is closed: stop listening for instance and session events. */
+  hide(): void {
+    this.stopWatching();
+  }
+
+  private stopWatching(): void {
+    this.unsubscribeRunning?.();
+    this.unsubscribeRunning = null;
+    this.runningEl = null;
+  }
+
+  private renderRunning(): void {
+    const el = this.runningEl;
+    if (!el || !this.running) return;
+    el.empty();
+    const rows = this.running.rows();
+    if (rows.length === 0) {
+      el.createDiv({ cls: "setting-item-description", text: NO_RUNNING_APPS_TEXT });
+      return;
+    }
+    for (const row of rows) {
+      new Setting(el)
+        .setName(row.name)
+        .setDesc(rowSummary(row))
+        .addButton((b) => b.setButtonText("Open").setDisabled(!row.canOpen).onClick(() => this.running?.open(row.slug)))
+        .addButton((b) => b.setButtonText("Stop").setDisabled(!row.canStop).setWarning().onClick(() => this.running?.stop(row.slug)))
+        .addButton((b) => b.setButtonText("Show log").setDisabled(!row.canShowLog).onClick(() => this.running?.showLog(row.slug)));
+    }
   }
 
   private renderRow(project: Project): void {

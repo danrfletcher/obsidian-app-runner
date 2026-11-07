@@ -32,6 +32,27 @@ export type OpenOutcome =
 
 export type StopResult = "nothing" | "stopped" | "cancelled" | "waited";
 
+/** Why an instance went away: a Stop (or cancelled start, or unload), the app exiting on its own, or a start that failed. */
+export type EndCause = "requested" | "crashed" | "start-failed";
+
+/**
+ * What the instance manager tells subscribers. `changed` fires when an instance appears or its state, port or Held flag
+ * changes. `ended` fires exactly once per instance, after it has left the table, with the reason.
+ */
+export type InstanceEvent = { type: "changed"; slug: string } | { type: "ended"; slug: string; cause: EndCause };
+
+/** A read-only view of one instance, for the running list. */
+export interface InstanceInfo {
+  slug: string;
+  name: string;
+  state: InstanceState;
+  port: number | null;
+  url: string | null;
+  startedAt: number;
+  held: boolean;
+  heldReason: string;
+}
+
 type StartResult = { kind: "ready"; url: string } | { kind: "failed" } | { kind: "cancelled" };
 
 interface Instance {
@@ -54,6 +75,11 @@ interface Instance {
   resolveReady: (r: StartResult) => void;
   /** Set once a stop has begun; resolves when the group is gone and the entry removed. */
   stopped: Promise<void> | null;
+  /** Why the instance will end, if it ends through the stop path. A Stop is the default; a failed start says so. */
+  endCause: EndCause;
+  /** Held instances are never auto-stopped (G14). Set by whoever holds it; this PR only reads it. */
+  held: boolean;
+  heldReason: string;
 }
 
 export interface InstanceDeps {
@@ -97,8 +123,34 @@ export interface InstanceDeps {
  */
 export class InstanceManager implements RuntimeSeams {
   private readonly instances = new Map<string, Instance>();
+  private readonly listeners = new Set<(event: InstanceEvent) => void>();
 
   constructor(private readonly deps: InstanceDeps) {}
+
+  /** Hear about instances appearing, changing and ending. Returns the unsubscribe. */
+  subscribe(listener: (event: InstanceEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => void this.listeners.delete(listener);
+  }
+
+  get listenerCount(): number {
+    return this.listeners.size;
+  }
+
+  /** Plugin unload: forget every subscriber. Instances are not touched. */
+  clearListeners(): void {
+    this.listeners.clear();
+  }
+
+  private emit(event: InstanceEvent): void {
+    for (const listener of [...this.listeners]) {
+      try {
+        listener(event);
+      } catch {
+        // A subscriber's failure must not break the state machine or the other subscribers.
+      }
+    }
+  }
 
   /** The state of the project's instance, or "none". */
   stateOf(slug: string): InstanceState | "none" {
@@ -107,6 +159,34 @@ export class InstanceManager implements RuntimeSeams {
 
   isRunning(slug: string): boolean {
     return this.instances.has(slug);
+  }
+
+  /** G14: a Held instance is never auto-stopped. */
+  isHeld(slug: string): boolean {
+    return this.instances.get(slug)?.held ?? false;
+  }
+
+  /** Mark an instance Held (with the reason shown in the running list) or release it. Does nothing when nothing runs. */
+  setHeld(slug: string, held: boolean, reason = ""): void {
+    const inst = this.instances.get(slug);
+    if (!inst || (inst.held === held && inst.heldReason === (held ? reason : ""))) return;
+    inst.held = held;
+    inst.heldReason = held ? reason : "";
+    this.emit({ type: "changed", slug });
+  }
+
+  /** Every instance as the running list shows it, in the order they were created. */
+  snapshots(): InstanceInfo[] {
+    return [...this.instances.values()].map((i) => ({
+      slug: i.slug,
+      name: this.deps.getProject(i.slug)?.name ?? i.project.name,
+      state: i.state,
+      port: i.port,
+      url: i.url,
+      startedAt: i.startedAt,
+      held: i.held,
+      heldReason: i.heldReason,
+    }));
   }
 
   /** The URL a tab should load: set once the app is running. */
@@ -173,9 +253,13 @@ export class InstanceManager implements RuntimeSeams {
       ready,
       resolveReady,
       stopped: null,
+      endCause: "requested",
+      held: false,
+      heldReason: "",
     };
     this.instances.set(project.slug, inst);
     this.deps.notify(`Starting ${project.name}`);
+    this.emit({ type: "changed", slug: project.slug });
     void this.runStart(inst);
     return ready.then((r): OpenOutcome => (r.kind === "ready" ? this.arrive(project.slug, r.url) : { kind: r.kind }));
   }
@@ -236,6 +320,7 @@ export class InstanceManager implements RuntimeSeams {
         inst.port = result.port;
         inst.url = result.url;
         inst.state = "running";
+        this.emit({ type: "changed", slug: inst.slug });
         // The port is recorded before the tab opens; a failed write leaves the earlier entry (pid and members) in place.
         await this.deps.registry.set(this.entryOf(inst)).catch(() => undefined);
         if (result.picked) void this.deps.rememberUrl(project.slug, result.url).catch(() => undefined);
@@ -277,7 +362,10 @@ export class InstanceManager implements RuntimeSeams {
     void this.refreshMembers(inst)
       .then(async (alive) => {
         if (inst.state !== "running" || alive.length > 0 || this.instances.get(inst.slug) !== inst) return;
+        // The app exited by itself: no Stop was requested (a Stop moves the state to stopping first). Nothing restarts it (F4).
+        inst.endCause = "crashed";
         this.instances.delete(inst.slug);
+        this.emit({ type: "ended", slug: inst.slug, cause: "crashed" });
         await this.deps.registry.remove(inst.slug).catch(() => undefined);
         this.deps.notify(`${inst.project.name} stopped on its own.`);
       })
@@ -288,7 +376,9 @@ export class InstanceManager implements RuntimeSeams {
   private async fail(inst: Instance, failure: StartFailure): Promise<void> {
     if (inst.state === "stopping") return;
     inst.state = "stopping";
+    inst.endCause = "start-failed";
     inst.abort.abort();
+    this.emit({ type: "changed", slug: inst.slug });
     inst.stopped = (async () => {
       this.deps.notify(startFailureNotice(inst.project.name, failure, await this.deps.fs.readTail(inst.logFile, LOG_TAIL_BYTES)));
       await this.killAndClean(inst, false);
@@ -320,6 +410,7 @@ export class InstanceManager implements RuntimeSeams {
     inst.state = "stopping";
     inst.cancelled = inst.cancelled || cancelling;
     inst.abort.abort();
+    this.emit({ type: "changed", slug: inst.slug });
     inst.stopped = this.killAndClean(inst, immediate).then(() => {
       if (cancelling) inst.resolveReady({ kind: "cancelled" });
     });
@@ -346,7 +437,10 @@ export class InstanceManager implements RuntimeSeams {
       }
     }
     if (!stopFailed) await this.deps.registry.remove(inst.slug).catch(() => undefined);
-    if (this.instances.get(inst.slug) === inst) this.instances.delete(inst.slug);
+    if (this.instances.get(inst.slug) === inst) {
+      this.instances.delete(inst.slug);
+      this.emit({ type: "ended", slug: inst.slug, cause: inst.endCause });
+    }
   }
 
   private leaderAlive(inst: Instance): boolean {
