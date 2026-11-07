@@ -51,9 +51,9 @@ describe("Open in browser, cold start (G12)", () => {
     const { w, l } = await plugin({ openInBrowser: true });
     l.tab.display();
     await openApp(w, l);
-    expect(listed(l)).toEqual([expect.stringMatching(/Held: opened in browser, stops only on Stop$/)]);
+    expect(listed(l)).toEqual([expect.stringMatching(/Held: opened in browser, waiting to read its tabs$/)]);
     expect(listed(l)[0]).not.toMatch(/0 tabs/);
-    expect(heldReasonText(HELD_OPENED_IN_BROWSER)).toBe("opened in browser, stops only on Stop");
+    expect(heldReasonText(HELD_OPENED_IN_BROWSER)).toBe("opened in browser, waiting to read its tabs");
   });
 
   it("a double Open while it starts opens the browser once", async () => {
@@ -136,12 +136,12 @@ describe("Pop out from a tab (G12)", () => {
     expect(l.plugin.sessions.count(SLUG)).toBe(0);
     expect(l.plugin.killTimer.isPending(SLUG)).toBe(false);
 
-    // The browser tab is closed: nothing can notice that yet, so after the grace and well past it the app is still there.
+    // The harness browser is not running, so no poll ever reads a tab: the hold never starts its clock, and well past the grace the app is still there.
     await w.clock.advance(10 * 60_000);
     expect(l.plugin.instances.stateOf(SLUG)).toBe("running");
     expect(w.signals).toEqual([]);
     expect(w.answers.has(8957)).toBe(true);
-    expect(listed(l)).toEqual([expect.stringMatching(/port 8957.*Held: opened in browser, stops only on Stop$/)]);
+    expect(listed(l)).toEqual([expect.stringMatching(/port 8957.*Held: opened in browser, waiting to read its tabs$/)]);
     spawnedOnlyTheApp(w);
   });
 

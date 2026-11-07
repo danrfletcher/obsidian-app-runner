@@ -81,7 +81,7 @@ describe("the Held entry is written, adopted and still Held", () => {
 
       // The list says why; no timer ever runs; the app is untouched ten minutes later.
       l.tab.display();
-      expect(l.rows()[0].desc).toMatch(/Held: opened in browser, stops only on Stop/);
+      expect(l.rows()[0].desc).toMatch(/Held: opened in browser, waiting to read its tabs/);
       await w.clock.advance(10 * 60_000);
       expect(l.plugin.instances.stateOf(SLUG)).toBe("running");
       expect(w.signals).toEqual([]);

@@ -1,6 +1,9 @@
 import { Notice, Platform, Plugin, type WorkspaceLeaf } from "obsidian";
 import { Adoption, type AdoptionDeps } from "./adopt";
 import { ProjectCommands, type InternalCommands } from "./commands";
+import { BrowserMonitor } from "./browser-monitor";
+import type { BrowserReaderDeps } from "./browser-poller";
+import { realDefaultBrowser, realIsRunning, realOsascript } from "./browser-system";
 import { realClock } from "./clock";
 import { InstanceManager, type InstanceDeps } from "./instance";
 import { KillTimer } from "./kill-timer";
@@ -69,11 +72,14 @@ export default class AppRunnerPlugin extends Plugin {
   sessions!: SessionCounter;
   killTimer!: KillTimer;
   adoption!: Adoption;
+  browser!: BrowserMonitor;
   /**
-   * G10: set before `onload` by whatever runs the browser poll (a later update). Adoption calls it for apps whose registry
-   * entry says a browser session was expected, and waits for it before any stop decision.
+   * G10: replaces the browser poll adoption resumes for apps whose registry entry says a browser session was expected.
+   * Left empty, adoption resumes the real `browser` monitor and waits for it before any stop decision. Tests set it before `onload`.
    */
   adoptionHooks: Pick<AdoptionDeps, "resumeBrowserPoll"> = {};
+  /** Replaces the system side of the browser poll (default browser, running check, osascript). Tests set it before `onload`; nothing here ever reaches a real browser in a test. */
+  browserDeps: Partial<BrowserReaderDeps> = {};
   /** Replaces parts of the real process side (spawn, ps, lsof, the runtime folder). Tests set it before `onload`. */
   instanceDeps: Partial<InstanceDeps> = {};
 
@@ -123,11 +129,21 @@ export default class AppRunnerPlugin extends Plugin {
       ...this.instanceDeps,
     };
     this.instances = new InstanceManager(deps);
+    // G13: browser tabs, polled while a browser session is expected. Created before adoption so it hears adopted apps appear.
+    this.browser = new BrowserMonitor({
+      clock: deps.clock,
+      target: this.instances,
+      reader: { defaultBrowser: realDefaultBrowser, isRunning: realIsRunning, osascript: realOsascript, ...this.browserDeps },
+      notify,
+      nameOf: (slug) => this.store.get(slug)?.name ?? slug,
+    });
+    // Obsidian tabs plus browser tabs: the one number the kill timer and the adoption decision judge by.
+    const totalSessions = (slug: string) => this.sessions.count(slug) + this.browser.tabCount(slug);
     // G14: Obsidian tabs per project, counted from the leaves' saved view state (loaded or not).
     this.sessions = new SessionCounter(() => this.app.workspace.getLeavesOfType(VIEW_TYPE_APP));
     this.killTimer = new KillTimer({
       clock: deps.clock,
-      sessionCount: (slug) => this.sessions.count(slug),
+      sessionCount: totalSessions,
       stateOf: (slug) => this.instances.stateOf(slug),
       isHeld: (slug) => this.instances.isHeld(slug),
       // An app adopted at launch is not judged until restored tabs are counted and the 15 s after layout ready have passed.
@@ -135,18 +151,25 @@ export default class AppRunnerPlugin extends Plugin {
       killOnClose: (slug) => this.store.get(slug)?.killOnClose,
       stop: (slug) => this.instances.stop(slug),
       onInstanceChange: (listener) => this.instances.subscribe((e) => listener(e.slug)),
-      onSessionChange: (listener) => this.sessions.subscribe(listener),
+      onSessionChange: (listener) => {
+        const offTabs = this.sessions.subscribe(listener);
+        const offBrowser = this.browser.subscribe(listener);
+        return () => {
+          offTabs();
+          offBrowser();
+        };
+      },
     });
     this.adoption = new Adoption({
       registry: deps.registry,
       table: deps.table,
       target: this.instances,
       getProject: (slug) => this.store.get(slug),
-      sessionCount: (slug) => this.sessions.count(slug),
+      sessionCount: totalSessions,
       killOnClose: (slug) => this.store.get(slug)?.killOnClose,
       clock: deps.clock,
       notify,
-      resumeBrowserPoll: this.adoptionHooks.resumeBrowserPoll,
+      resumeBrowserPoll: this.adoptionHooks.resumeBrowserPoll ?? ((slugs) => this.browser.resume(slugs)),
       onSettled: (slug) => this.killTimer.evaluate(slug),
     });
     this.registerEvent(this.app.workspace.on("layout-change", () => this.sessions.refresh()));
@@ -200,13 +223,20 @@ export default class AppRunnerPlugin extends Plugin {
     );
     this.manager.registerAll();
     const running: RunningListHost = {
-      rows: () => buildRunningRows(this.instances.snapshots(), { sessions: (slug) => this.sessions.count(slug), logExists: (slug) => logs.exists(slug) }),
+      rows: () =>
+        buildRunningRows(this.instances.snapshots(), {
+          sessions: (slug) => this.sessions.count(slug),
+          browserSessions: (slug) => this.browser.tabCount(slug),
+          logExists: (slug) => logs.exists(slug),
+        }),
       subscribe: (listener) => {
         const offInstances = this.instances.subscribe(() => listener());
         const offSessions = this.sessions.subscribe(() => listener());
+        const offBrowser = this.browser.subscribe(() => listener());
         return () => {
           offInstances();
           offSessions();
+          offBrowser();
         };
       },
       open: (slug) => void this.openProject(slug),
@@ -221,6 +251,7 @@ export default class AppRunnerPlugin extends Plugin {
    * nothing is signalled or written: the registry stays as it is, and the next launch adopts what is still running.
    */
   onunload(): void {
+    this.browser?.dispose();
     this.killTimer?.dispose();
     this.adoption?.dispose();
     this.sessions?.clearListeners();

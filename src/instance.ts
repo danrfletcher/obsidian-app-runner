@@ -47,7 +47,8 @@ export type EndCause = "requested" | "crashed" | "start-failed";
 
 /**
  * What the instance manager tells subscribers. `changed` fires when an instance appears or its state, port or Held flag
- * changes. `ended` fires exactly once per instance, after it has left the table, with the reason.
+ * changes. `ended` fires exactly once per instance, after it has left the table, with the reason. (Hand-offs to the
+ * browser have their own subscription, `subscribeHandOff`.)
  */
 export type InstanceEvent = { type: "changed"; slug: string } | { type: "ended"; slug: string; cause: EndCause };
 
@@ -89,13 +90,16 @@ interface Instance {
   stopped: Promise<void> | null;
   /** Why the instance will end, if it ends through the stop path. A Stop is the default; a failed start says so. */
   endCause: EndCause;
-  /** Held instances are never auto-stopped (G14). Set when the app is opened in the browser (G12); only Stop, a crash or delete ends it. */
+  /**
+   * Held instances are never auto-stopped (G14). Set when the app is opened in the browser (G12) and while the browser
+   * cannot be read (G13); the browser monitor clears it when the hold ends. Stop, a crash or delete ends the instance.
+   */
   held: boolean;
   /** Why it is Held, as a short code (`held.ts`). Empty when not Held. */
   heldReason: string;
   /** G10: found in the registry at launch. It is not our child, so only the 5 s liveness poll can tell that it died. */
   adopted: boolean;
-  /** G13: persisted in the registry so the browser poll can resume at relaunch. Set when the app is opened in the browser. */
+  /** G13: persisted in the registry so the browser poll can resume at relaunch. Set when the app is opened in the browser; the browser monitor polls while it is set. */
   browserSessionExpected: boolean;
   /** G12, E17: a Pop out waiting for the start to finish or just running; a second one joins it instead of opening a second page. */
   popOutPending: Promise<PopOutOutcome> | null;
@@ -158,6 +162,7 @@ export interface StopOptions {
 export class InstanceManager implements RuntimeSeams {
   private readonly instances = new Map<string, Instance>();
   private readonly listeners = new Set<(event: InstanceEvent) => void>();
+  private readonly handOffListeners = new Set<(slug: string) => void>();
   private readonly liveness: LivenessPoll;
   private disposed = false;
 
@@ -169,6 +174,15 @@ export class InstanceManager implements RuntimeSeams {
   subscribe(listener: (event: InstanceEvent) => void): () => void {
     this.listeners.add(listener);
     return () => void this.listeners.delete(listener);
+  }
+
+  /**
+   * Hear about each time the app is given to the default browser (Pop out, Open in browser), called after the instance is
+   * Held and flagged for a browser session, so the browser monitor can start a fresh hold. Returns the unsubscribe.
+   */
+  subscribeHandOff(listener: (slug: string) => void): () => void {
+    this.handOffListeners.add(listener);
+    return () => void this.handOffListeners.delete(listener);
   }
 
   get listenerCount(): number {
@@ -193,6 +207,7 @@ export class InstanceManager implements RuntimeSeams {
       inst.resolveReady({ kind: "cancelled" });
     }
     this.listeners.clear();
+    this.handOffListeners.clear();
   }
 
   private emit(event: InstanceEvent): void {
@@ -225,10 +240,21 @@ export class InstanceManager implements RuntimeSeams {
     return this.instances.get(slug)?.held ?? false;
   }
 
+  /** G12, G13: why the instance is Held, as a reason code (`held.ts`); empty when it is not. */
+  heldReasonOf(slug: string): string {
+    return this.instances.get(slug)?.heldReason ?? "";
+  }
+
+  /** The port the app answered on, or null while there is none. The browser poll matches tabs against it. */
+  portOf(slug: string): number | null {
+    return this.instances.get(slug)?.port ?? null;
+  }
+
   /**
    * Mark an instance Held (with the reason shown in the running list) or release it. Does nothing when nothing runs.
    * The flag and reason are saved in the registry entry, so a relaunch adopts the app still Held (G12). Only the holder
-   * calls this with `false`; no timer in this plugin does.
+   * calls this: the hand-off to the browser sets it, and the browser monitor sets it for an unreadable browser and clears
+   * it when the hold ends (G13). Nothing else does.
    */
   setHeld(slug: string, held: boolean, reason = ""): void {
     const inst = this.instances.get(slug);
@@ -325,7 +351,8 @@ export class InstanceManager implements RuntimeSeams {
    * is (no query, fragment, relay or rewritten host); anything that is not an http(s) loopback URL is refused with a
    * notice before the opener is called. An opener that throws, or whose promise rejects, also gets a notice. In both
    * cases nothing is Held: Held is set only after the opener has resolved.
-   * Held is set only here, only for a running instance, with the one reason this PR has.
+   * Held is set here only for a running instance, with the pop-out hold reason; the browser monitor takes over from the
+   * `handed-off` event (it may replace the reason with why the browser cannot be read).
    */
   private async handOffToBrowser(slug: string, url: string | null): Promise<boolean> {
     const inst = this.instances.get(slug);
@@ -349,6 +376,7 @@ export class InstanceManager implements RuntimeSeams {
     if (inst && this.instances.get(slug) === inst && inst.state === "running") {
       inst.browserSessionExpected = true; // G13: saved with the Held flag by the same registry write
       this.setHeld(slug, true, HELD_OPENED_IN_BROWSER);
+      if (!this.disposed) for (const listener of [...this.handOffListeners]) listener(slug);
     }
     return true;
   }

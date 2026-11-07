@@ -32,7 +32,7 @@ export interface AdoptionDeps {
   notify(message: string): void;
   /**
    * G10/G13: resume the browser poll for apps whose registry entry says a browser session was expected. The stop
-   * decision waits for it. This PR only provides the hook; the browser poll plugs in later. Absent means nothing to resume.
+   * decision waits for it (`BrowserMonitor.resume`). Absent means nothing to resume.
    */
   resumeBrowserPoll?(slugs: string[]): Promise<void>;
   /** The adoption decision for the app is made: the normal Kill-when-closed rule may take over. */
@@ -188,7 +188,7 @@ export class Adoption {
         if (this.disposed) return;
         (target.stateOf(slug) === "none" ? stopped : stillRunning).push(name);
       } else if (noTab && (this.deps.killOnClose(slug) !== true || target.isHeld(slug))) {
-        // Kill off, or Held (G12: opened in the browser, stops only on Stop): named as still running, never stopped here.
+        // Kill off, or Held (G12, G13: opened in the browser and not yet read, or the browser cannot be read): named as still running, never stopped here.
         stillRunning.push(name);
       }
       this.settle(slug);

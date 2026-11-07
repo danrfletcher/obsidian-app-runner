@@ -6,7 +6,7 @@ export const GRACE_MS = 15_000;
 
 export interface KillTimerDeps {
   clock: Clock;
-  /** Obsidian tabs plus browser tabs for the project (browser tabs are always zero until browser monitoring lands). */
+  /** Obsidian tabs plus browser tabs for the project (G13: browser tabs come from the browser monitor). */
   sessionCount(slug: string): number;
   stateOf(slug: string): InstanceState | "none";
   isHeld(slug: string): boolean;

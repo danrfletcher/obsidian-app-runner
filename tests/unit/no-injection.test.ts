@@ -81,8 +81,10 @@ describe("F6 and F8 the only external action is the browser open, on a checked l
     expect(view).toMatch(/isLoopbackUrl\(url\)\) return url;/);
   });
 
-  it("no osascript or AppleScript anywhere (E9)", () => {
-    expect(where(/osascript|AppleScript|NSAppleScript/i)).toEqual([]);
+  it("osascript is run from one module, and AppleScript text lives in one other (F15)", () => {
+    expect(where(/const OSASCRIPT = |NSAppleScript/)).toEqual(["src/browser-system.ts"]);
+    expect(where(/tell application/)).toEqual(["src/browser-script.ts"]);
+    expect(where(/execFile\(OSASCRIPT/)).toEqual(["src/browser-system.ts"]);
   });
 
   it("the OS open is reached from main.ts only, and only through the one openExternal function", () => {

@@ -16,7 +16,8 @@ export interface RegistryEntry {
   startedAt: number;
   /**
    * G13: a browser session is expected (the app was opened in the browser, popped out, or a browser tab was seen). It is
-   * saved so that at relaunch the browser poll resumes before any stop decision. This PR only persists it.
+   * saved so that at relaunch the browser poll resumes before any stop decision (`BrowserMonitor.resume`). It stays set
+   * for the life of the instance: polling continues so a browser tab opened later is still counted.
    */
   browserSessionExpected: boolean;
   /**

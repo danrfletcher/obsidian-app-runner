@@ -13,7 +13,7 @@ export interface RunningRow {
   portText: string;
   startedAt: number;
   startedText: string;
-  /** "N tabs" for Obsidian tabs, or "Held: <reason>" when the instance is Held. */
+  /** "N tabs" for Obsidian tabs, "N browser tabs" for browser tabs, both joined, or "Held: <reason>" when the instance is Held. */
   sessionsText: string;
   /** Open adds a tab, so it needs a running app. */
   canOpen: boolean;
@@ -26,7 +26,10 @@ export interface RunningRow {
 }
 
 export interface RowInputs {
+  /** Obsidian tabs. */
   sessions(slug: string): number;
+  /** G13: browser tabs on the app's port, from the browser poll. Absent means none are counted. */
+  browserSessions?(slug: string): number;
   logExists(slug: string): boolean;
   /** How a start time is worded. Defaults to local HH:MM:SS. */
   formatTime?(ms: number): string;
@@ -44,9 +47,20 @@ export function tabsText(count: number): string {
   return `${count} ${count === 1 ? "tab" : "tabs"}`;
 }
 
-/** The sessions cell: a Held instance says Held and why (the reason code worded by `heldReasonText`); otherwise the count of Obsidian tabs. */
-export function sessionsText(info: Pick<InstanceInfo, "held" | "heldReason">, count: number): string {
-  if (!info.held) return tabsText(count);
+/** "1 browser tab", "2 browser tabs". */
+export function browserTabsText(count: number): string {
+  return `${count} browser ${count === 1 ? "tab" : "tabs"}`;
+}
+
+/**
+ * The sessions cell: a Held instance says Held and why (the reason code worded by `heldReasonText`); otherwise the count
+ * of Obsidian tabs, or of browser tabs when there are only those, or both ("1 tab, 1 browser tab") when there are both.
+ */
+export function sessionsText(info: Pick<InstanceInfo, "held" | "heldReason">, count: number, browserCount = 0): string {
+  if (!info.held) {
+    if (browserCount <= 0) return tabsText(count);
+    return count <= 0 ? browserTabsText(browserCount) : `${tabsText(count)}, ${browserTabsText(browserCount)}`;
+  }
   const reason = heldReasonText(info.heldReason);
   return reason === "" ? "Held" : `Held: ${reason}`;
 }
@@ -67,7 +81,7 @@ export function buildRunningRows(infos: readonly InstanceInfo[], inputs: RowInpu
       portText: info.port === null ? "–" : String(info.port),
       startedAt: info.startedAt,
       startedText: format(info.startedAt),
-      sessionsText: sessionsText(info, inputs.sessions(info.slug)),
+      sessionsText: sessionsText(info, inputs.sessions(info.slug), inputs.browserSessions?.(info.slug) ?? 0),
       canOpen: info.state === "running",
       canStop: info.state !== "stopping",
       canShowLog: inputs.logExists(info.slug),

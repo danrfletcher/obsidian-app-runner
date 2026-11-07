@@ -2,6 +2,7 @@ import AppRunnerPlugin from "../src/main";
 import type { InstanceDeps } from "../src/instance";
 import type { AppRunnerSettingTab } from "../src/settings-tab";
 import { VIEW_TYPE_APP } from "../src/webview-view";
+import { FakeBrowser } from "./browser-fakes";
 import { WorkspaceLeaf, type FakeNode, type Plugin as MockPlugin } from "./obsidian-mock";
 import type { FakeWorld } from "./process-fakes";
 
@@ -20,6 +21,8 @@ export interface LaunchOptions {
   configure?: (plugin: MockedPlugin) => void;
   /** Use this file system for logs instead of the world's in-memory one. */
   runtimeFs?: InstanceDeps["fs"];
+  /** The browser the poll sees. Default: the default browser is Brave and it is not running, so no tab is ever read. */
+  browser?: FakeBrowser;
 }
 
 /**
@@ -69,11 +72,14 @@ export async function launch(world: FakeWorld, opts: LaunchOptions = {}) {
   const { spawn, table, lsof, kill, http, clock, fs, registry, openExternal } = world.deps();
   plugin.instanceDeps = { spawn, table, lsof, kill, http, clock, fs: opts.runtimeFs ?? fs, registry: opts.registry ?? registry, openExternal, runtimeDir: opts.runtimeDir ?? "/runtime/k" };
   plugin.stored = { vaultKey: opts.vaultKey ?? "k", projects: [...world.projects.values()] };
+  const browser = opts.browser ?? new FakeBrowser();
+  plugin.browserDeps = browser.deps(); // a test never reaches the real osascript, plutil or lsappinfo
   opts.configure?.(plugin);
   await plugin.onload();
   const tab = plugin.settingTabs[0] as AppRunnerSettingTab;
   return {
     plugin,
+    browser,
     leaves,
     workspace,
     tab,
