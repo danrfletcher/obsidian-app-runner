@@ -116,6 +116,7 @@ function control(kind: "text" | "toggle" | "button"): MockControl {
   c.setButtonText = (v: string) => ((c.text = v), c);
   c.setWarning = () => ((c.warning = true), c);
   c.setCta = () => ((c.cta = true), c);
+  c.setDisabled = (v: boolean) => ((c.disabled = v), c);
   c.onClick = (fn: () => unknown) => ((c.handler = fn), c);
   return c;
 }

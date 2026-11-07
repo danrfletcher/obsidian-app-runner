@@ -381,3 +381,33 @@ describe("add and remove", () => {
     expect(await store.remove("live-captions")).toBeUndefined();
   });
 });
+
+describe("setUrlOverride (E3: remember the picked port)", () => {
+  it("stores a loopback URL on the project and saves it", async () => {
+    const store = make();
+    await store.load();
+    await store.add(input());
+    const saves = persistence.saves;
+    expect((await store.setUrlOverride("live-captions", "http://127.0.0.1:8957/"))?.urlOverride).toBe("http://127.0.0.1:8957/");
+    expect(persistence.saves).toBe(saves + 1);
+    const reloaded = make();
+    await reloaded.load();
+    expect(reloaded.get("live-captions")?.urlOverride).toBe("http://127.0.0.1:8957/");
+  });
+
+  it.each(["http://example.com:8957/", "javascript:alert(1)", "", "http://192.168.1.2:3000/"])("refuses %j and changes nothing", async (url) => {
+    const store = make();
+    await store.load();
+    await store.add(input({ urlOverride: "http://127.0.0.1:1111" }));
+    const saves = persistence.saves;
+    expect(await store.setUrlOverride("live-captions", url)).toBeUndefined();
+    expect(store.get("live-captions")?.urlOverride).toBe("http://127.0.0.1:1111");
+    expect(persistence.saves).toBe(saves);
+  });
+
+  it("does nothing for a project that does not exist", async () => {
+    const store = make();
+    await store.load();
+    expect(await store.setUrlOverride("gone", "http://127.0.0.1:8957/")).toBeUndefined();
+  });
+});

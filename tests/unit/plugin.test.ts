@@ -3,6 +3,7 @@ import AppRunnerPlugin, { UNSUPPORTED_PLATFORM_NOTICE } from "../../src/main";
 import { POP_OUT_COMMAND_ID } from "../../src/commands";
 import { AppRunnerView, VIEW_TYPE_APP } from "../../src/webview-view";
 import { Notice, Platform, WorkspaceLeaf, type Plugin as MockPlugin } from "../obsidian-mock";
+import { FakeWorld } from "../process-fakes";
 
 /** The real plugin class, seen with the mock base class's recording fields. */
 type Mocked = AppRunnerPlugin & Pick<MockPlugin, "commands" | "views" | "settingTabs" | "forbiddenCalls" | "stored">;
@@ -116,35 +117,102 @@ describe("GP2 commands survive a reload", () => {
 });
 
 describe("the commands in this PR", () => {
-  async function loaded(urlOverride = "") {
+  /** The plugin with the process side faked: the folder exists, no real process or port is touched. */
+  async function loaded(urlOverride = "", openInBrowser = false) {
     const made = makePlugin();
+    const world = new FakeWorld();
+    world.dirs.add("/x");
+    const { spawn, table, lsof, kill, http, clock, fs, registry, openExternal } = world.deps();
+    made.plugin.instanceDeps = { spawn, table, lsof, kill, http, clock, fs, registry, openExternal, runtimeDir: "/runtime/k" };
     made.plugin.stored = {
       vaultKey: "k",
-      projects: [{ name: "Live Captions", slug: "live-captions", folder: "/x", command: "c", urlOverride, killOnClose: true, openInBrowser: false }],
+      projects: [{ name: "Live Captions", slug: "live-captions", folder: "/x", command: "c", urlOverride, killOnClose: true, openInBrowser }],
     };
     await made.plugin.onload();
-    return made;
+    return { ...made, world };
   }
 
   it("Stop shows nothing running", async () => {
     const { plugin } = await loaded();
     plugin.commands.get("stop-live-captions")!.callback!();
+    await Promise.resolve();
     expect(Notice.messages).toEqual(["Nothing running for Live Captions."]);
   });
 
-  it("Open without an override shows a notice that starting comes later, and opens no tab", async () => {
-    const { plugin, leaves } = await loaded();
-    await plugin.openProject("live-captions");
-    expect(Notice.messages[0]).toMatch(/Starting Live Captions arrives with the next App Runner update/);
-    expect(leaves).toEqual([]);
-  });
-
-  it("Open with an override opens a tab with the slug as its only state", async () => {
-    const { plugin, leaves } = await loaded("http://127.0.0.1:8957");
-    await plugin.openProject("live-captions");
+  it("Open starts the app, and opens one tab with the slug as its only state once it answers", async () => {
+    const { plugin, leaves, world } = await loaded();
+    const opening = plugin.openProject("live-captions");
+    await world.clock.settle();
+    expect(Notice.messages).toEqual(["Starting Live Captions"]);
+    expect(leaves).toEqual([]); // no tab until the app answers
+    world.serve(8957);
+    await world.clock.run(opening);
     expect(leaves).toHaveLength(1);
     expect(leaves[0].viewState).toMatchObject({ type: VIEW_TYPE_APP, state: { slug: "live-captions" } });
-    expect(Notice.messages).toEqual([]);
+    expect(world.spawns).toHaveLength(1);
+  });
+
+  it("two Open commands at once make one process and one tab", async () => {
+    const { plugin, leaves, world } = await loaded();
+    const a = plugin.openProject("live-captions");
+    const b = plugin.openProject("live-captions");
+    await world.clock.settle();
+    world.serve(8957);
+    await world.clock.run(Promise.all([a, b]));
+    expect(world.spawns).toHaveLength(1);
+    expect(leaves).toHaveLength(1);
+  });
+
+  it("Open with Open-in-browser on opens no tab (the URL goes to the browser seam)", async () => {
+    const { plugin, leaves, world } = await loaded("", true);
+    const opening = plugin.openProject("live-captions");
+    await world.clock.settle();
+    world.serve(8957);
+    await world.clock.run(opening);
+    expect(leaves).toEqual([]);
+    expect(world.external).toEqual(["http://127.0.0.1:8957/"]);
+  });
+
+  it("a failed start opens no tab and shows the failure notice", async () => {
+    const { plugin, leaves, world } = await loaded();
+    world.nextLeader = { exitsWith: 127 };
+    await world.clock.run(plugin.openProject("live-captions"));
+    expect(leaves).toEqual([]);
+    expect(Notice.messages.at(-1)).toContain("stopped before it was ready");
+  });
+
+  it("Stop command stops the running app", async () => {
+    const { plugin, world } = await loaded();
+    const opening = plugin.openProject("live-captions");
+    await world.clock.settle();
+    world.serve(8957);
+    await world.clock.run(opening);
+    const leader = world.leaderPid();
+    const stopping = plugin.stopProject("live-captions");
+    await world.clock.run(stopping);
+    expect(world.signals[0]).toEqual([-leader, "SIGTERM"]);
+    expect(world.procs).toEqual([]);
+    expect(Notice.messages.at(-1)).toBe("Stopped Live Captions.");
+  });
+
+  it("unloading the plugin sends SIGTERM to the app's group at once, and only to that group (F11)", async () => {
+    const { plugin, world } = await loaded();
+    world.addProc(4242, 4242); // Dan's own process
+    const opening = plugin.openProject("live-captions");
+    await world.clock.settle();
+    world.serve(8957);
+    await world.clock.run(opening);
+    const leader = world.leaderPid();
+    plugin.onunload();
+    expect(world.signals).toEqual([[-leader, "SIGTERM"]]);
+    await world.clock.advance(500);
+    expect(world.procs.map((p) => p.pid)).toEqual([4242]);
+  });
+
+  it("unloading with nothing running signals nothing", async () => {
+    const { plugin, world } = await loaded();
+    plugin.onunload();
+    expect(world.signals).toEqual([]);
   });
 
   it("Open for a deleted project says so", async () => {

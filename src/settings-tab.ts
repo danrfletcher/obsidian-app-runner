@@ -3,6 +3,7 @@ import type { ProjectManager } from "./manager";
 import { ProjectForm } from "./project-form";
 import type { Project } from "./project";
 import type { SettingsStore } from "./settings-store";
+import type { LogActions } from "./show-log";
 import type { FieldErrors } from "./validation";
 
 /** "Stop and delete" for a running project (G3). Resolves true only on the confirm button. */
@@ -45,6 +46,8 @@ export class AppRunnerSettingTab extends PluginSettingTab {
     plugin: Plugin,
     private readonly store: SettingsStore,
     private readonly manager: ProjectManager,
+    /** Show log (G17). Without it the button is shown disabled. */
+    private readonly logs?: LogActions,
   ) {
     super(app, plugin);
     this.form = new ProjectForm(manager);
@@ -76,6 +79,13 @@ export class AppRunnerSettingTab extends PluginSettingTab {
           .setTooltip("Open in browser")
           .setValue(project.openInBrowser)
           .onChange((v) => this.onRowToggle(project.slug, "openInBrowser", v)),
+      )
+      .addButton((b) =>
+        b
+          .setButtonText("Show log")
+          .setTooltip("Open this project's log file")
+          .setDisabled(!this.logs?.exists(project.slug))
+          .onClick(() => void this.logs?.show(project.slug)),
       )
       .addButton((b) =>
         b.setButtonText("Edit").onClick(() => {

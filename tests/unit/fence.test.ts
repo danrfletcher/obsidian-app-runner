@@ -17,8 +17,8 @@ function sourceFiles(dir: string): string[] {
   });
 }
 
-/** Modules that may talk to the network. Empty in this PR: a loopback probe arrives with PR-2. */
-const NETWORK_ALLOW_LIST: string[] = [];
+/** The one module that may talk to the network: the loopback probe. It refuses any URL that is not loopback. */
+const NETWORK_ALLOW_LIST = ["src/loopback-http.ts"];
 
 const sources = sourceFiles(path.join(root, "src")).map((file) => ({ file: path.relative(root, file), text: fs.readFileSync(file, "utf8") }));
 let bundle = "";
@@ -72,18 +72,27 @@ describe("F8 no telemetry, no network apart from loopback and the browser", () =
     ["requestUrl", /requestUrl/],
     ["sendBeacon", /sendBeacon/],
   ])("%s appears outside the allow-listed loopback module", (_label, pattern) => {
-    expect(hits(pattern, NETWORK_ALLOW_LIST)).toEqual([]);
+    // The bundle contains the allow-listed module, so a bundle hit only counts when no allow-listed source explains it.
+    const explained = NETWORK_ALLOW_LIST.some((f) => pattern.test(sources.find((s) => s.file === f)!.text));
+    expect(hits(pattern, NETWORK_ALLOW_LIST).filter((h) => !(explained && h === "main.js (bundle)"))).toEqual([]);
   });
 
-  it("the allow-list is empty and no such module exists yet", () => {
-    expect(NETWORK_ALLOW_LIST).toEqual([]);
-    expect(sources.map((s) => s.file).filter((f) => /probe/i.test(f))).toEqual([]);
+  it("the allow-list is exactly the loopback module, and that module checks the URL before opening a socket", () => {
+    expect(NETWORK_ALLOW_LIST).toEqual(["src/loopback-http.ts"]);
+    const text = sources.find((s) => s.file === "src/loopback-http.ts")!.text;
+    expect(text).toMatch(/isLoopbackUrl\(rawUrl\)/);
+    expect(text.indexOf("isLoopbackUrl(rawUrl)")).toBeLessThan(text.indexOf(".request("));
+    expect(text).not.toMatch(/\bfetch\s*\(|WebSocket|XMLHttpRequest/);
+  });
+
+  it("the node:http probe is the only reader of http/https modules", () => {
+    expect(sources.filter((s) => /["'](?:node:)?https?["']/.test(s.text)).map((s) => s.file)).toEqual(["src/loopback-http.ts"]);
   });
 
   it("the only place a webview src is set is guarded by the loopback check", () => {
     const setters = sources.filter((s) => /setAttribute\(\s*["']src["']/.test(s.text));
     expect(setters.map((s) => s.file)).toEqual(["src/webview-view.ts"]);
-    expect(setters[0].text).toMatch(/webviewUrl\(project\)/);
+    expect(setters[0].text).toMatch(/webviewUrl\(project[,)]/);
     expect(sources.find((s) => s.file === "src/webview-view.ts")!.text).toMatch(/isLoopbackUrl\(url\)/);
     expect(hits(/\.src\s*=/)).toEqual([]);
     expect(hits(/iframe/i, ["src/webview-view.ts"])).toEqual([]);

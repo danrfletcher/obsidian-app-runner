@@ -1,12 +1,13 @@
 import type { Project } from "./project";
 
 /**
- * Seams the next PRs fill. In this PR nothing is ever running and removing a project has no runtime files to clean up.
+ * What the project manager asks of the process side. `InstanceManager` (instance.ts) is the real one; `stubSeams` is
+ * for tests and for anything that has no process control.
  */
 export interface RuntimeSeams {
-  /** PR-2 fills this: is the project's app running (or starting)? */
+  /** Is the project's app starting, running or stopping? */
   isRunning(slug: string): boolean;
-  /** PR-2 stops the app, PR-2/PR-4 remove its registry entry and log file. A no-op until then. */
+  /** Stop the app if there is one, then remove its registry entry and log file (G3). */
   removeRuntime(project: Project): Promise<void>;
 }
 

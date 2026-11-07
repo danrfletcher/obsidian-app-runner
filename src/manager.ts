@@ -47,7 +47,7 @@ export class ProjectManager {
 
   /**
    * G3. A running project is only deleted after `confirmStopAndDelete` resolves true; the seam then stops it and
-   * removes its runtime files (a no-op until PR-2/PR-4). Then its commands and its settings row go.
+   * removes its runtime files. Then its commands and its settings row go.
    */
   async delete(slug: string, confirmStopAndDelete: (project: Project) => Promise<boolean>): Promise<DeleteOutcome> {
     const project = this.store.get(slug);

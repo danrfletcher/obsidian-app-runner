@@ -8,6 +8,8 @@ export const VIEW_TYPE_APP = "app-runner-view";
 export interface ViewHost {
   getProject(slug: string): Project | undefined;
   isWebviewAvailable(): boolean;
+  /** The loopback URL of the project's running app, or undefined when it is not running. */
+  instanceUrl?(slug: string): string | undefined;
   /** Open a URL in the default browser. */
   openExternal(url: string): void;
   notify(message: string): void;
@@ -38,15 +40,19 @@ export function isWebviewAvailable(env?: WebviewProbeEnv): boolean {
 }
 
 /**
- * The URL a tab loads: the project's override. It is re-checked here, so a `src` is never anything but a loopback URL
- * even if data.json was edited by hand (F6, F8). null when there is nothing to show yet.
+ * The URL a tab loads: the running app's URL when the host knows one, else the project's URL override. It is re-checked
+ * here, so a `src` is never anything but a loopback URL even if data.json was edited by hand (F6, F8). null when there
+ * is nothing to show.
  */
-export function webviewUrl(project: Project): string | null {
-  const url = project.urlOverride.trim();
-  return url !== "" && isLoopbackUrl(url) ? url : null;
+export function webviewUrl(project: Project, instanceUrl?: string): string | null {
+  for (const candidate of [instanceUrl, project.urlOverride]) {
+    const url = candidate?.trim() ?? "";
+    if (url !== "" && isLoopbackUrl(url)) return url;
+  }
+  return null;
 }
 
-/** G11: one tab, one `<webview>`. The view state is the slug only; the URL is read from project settings at load. */
+/** G11: one tab, one `<webview>`. The view state is the slug only; the URL is read from the instance at load. */
 export class AppRunnerView extends ItemView {
   private slug = "";
 
@@ -70,7 +76,7 @@ export class AppRunnerView extends ItemView {
     return { slug: this.slug };
   }
 
-  /** Called when the tab is opened, restored or duplicated: the URL is looked up now, so a changed override is followed. */
+  /** Called when the tab is opened, restored or duplicated: the URL is looked up now, so a changed port is followed. */
   async setState(state: unknown, result: ViewStateResult): Promise<void> {
     const slug = (state as { slug?: unknown } | null)?.slug;
     this.slug = typeof slug === "string" ? slug : "";
@@ -85,9 +91,9 @@ export class AppRunnerView extends ItemView {
       this.showMessage("This project no longer exists in App Runner settings. Close this tab.");
       return;
     }
-    const url = webviewUrl(project);
+    const url = webviewUrl(project, this.host.instanceUrl?.(this.slug));
     if (url === null) {
-      this.showMessage(`${project.name} has no page to show yet. Starting apps arrives in a later update; set a URL override in the project settings to open a page now.`);
+      this.showMessage(`${project.name} is not running. Run "Open ${project.name}" from the command palette to start it.`);
       return;
     }
     if (!this.host.isWebviewAvailable()) {

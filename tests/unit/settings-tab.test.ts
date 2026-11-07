@@ -202,3 +202,42 @@ describe("rows (G2, G3)", () => {
     expect(store.projects).toHaveLength(1);
   });
 });
+
+describe("Show log (G17)", () => {
+  async function withLogs(existing: boolean) {
+    const plugin = new Plugin({}, { id: "app-runner" });
+    const store = new SettingsStore(memoryPersistence(), { fs: fakeFs() });
+    await store.load();
+    const commands = new ProjectCommands(plugin, "app-runner", { open() {}, stop() {}, popOutCurrentTab() {} }, () => undefined);
+    const manager = new ProjectManager(store, commands, stubSeams, () => {});
+    const shown: string[] = [];
+    const tab = new AppRunnerSettingTab({} as never, plugin as never, store, manager, { exists: () => existing, show: async (slug) => void shown.push(slug) });
+    await manager.add(input());
+    Setting.reset();
+    tab.display();
+    const row = Setting.all.findLast((x) => x.name === "Live Captions")!;
+    return { row, shown, button: row.buttons.find((b) => b.text === "Show log")! };
+  }
+
+  it("a row has a Show log button that opens that project's log", async () => {
+    const { button, shown } = await withLogs(true);
+    expect(button.disabled).toBe(false);
+    button.handler!();
+    expect(shown).toEqual(["live-captions"]);
+  });
+
+  it("the button is disabled while the project has no log", async () => {
+    const { button } = await withLogs(false);
+    expect(button.disabled).toBe(true);
+  });
+
+  it("without log actions the button is disabled", async () => {
+    const { row } = await (async () => {
+      const s = await setup();
+      await s.manager.add(input());
+      s.show();
+      return { row: Setting.all.findLast((x) => x.name === "Live Captions")! };
+    })();
+    expect(row.buttons.find((b) => b.text === "Show log")!.disabled).toBe(true);
+  });
+});

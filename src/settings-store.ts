@@ -1,6 +1,6 @@
 import type { Project, ProjectInput } from "./project";
 import { slugForNewProject } from "./slug";
-import { validateProject, realFs, type FieldErrors, type FsProbe } from "./validation";
+import { isLoopbackUrl, validateProject, realFs, type FieldErrors, type FsProbe } from "./validation";
 
 export const DATA_VERSION = 1;
 
@@ -215,6 +215,18 @@ export class SettingsStore {
     const index = this.data.projects.findIndex((p) => p.slug === slug);
     if (index < 0) return undefined;
     this.data.projects[index] = { ...this.data.projects[index], [key]: value };
+    await this.save();
+    return this.data.projects[index];
+  }
+
+  /**
+   * E3: remember the port the user picked as the project's URL override. Only a loopback URL is stored (F6); anything
+   * else is refused and nothing changes.
+   */
+  async setUrlOverride(slug: string, url: string): Promise<Project | undefined> {
+    const index = this.data.projects.findIndex((p) => p.slug === slug);
+    if (index < 0 || !isLoopbackUrl(url)) return undefined;
+    this.data.projects[index] = { ...this.data.projects[index], urlOverride: url.trim() };
     await this.save();
     return this.data.projects[index];
   }

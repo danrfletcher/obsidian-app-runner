@@ -104,11 +104,11 @@ describe("the tab is a webview, not an iframe (G11)", () => {
     }
   });
 
-  it("with no override it shows what is missing and renders no webview", async () => {
+  it("with no running app and no override it says so and renders no webview", async () => {
     const { view } = setup([project({ urlOverride: "" })]);
     await view.setState({ slug: "live-captions" }, RESULT);
     expect(dom(view).all().some((e) => e.tag === "webview")).toBe(false);
-    expect(dom(view).textContent()).toMatch(/URL override/);
+    expect(dom(view).textContent()).toBe('Live Captions is not running. Run "Open Live Captions" from the command palette to start it.');
   });
 
   it("a deleted project shows a message", async () => {
@@ -179,5 +179,26 @@ describe("webviewUrl", () => {
     ["http://example.com", null],
   ])("%s", (urlOverride, expected) => {
     expect(webviewUrl(project({ urlOverride }))).toBe(expected);
+  });
+});
+
+describe("the running app's URL", () => {
+  it("is used in preference to the override, and only when it is loopback", () => {
+    expect(webviewUrl(project({ urlOverride: "http://127.0.0.1:1111" }), "http://127.0.0.1:2222/")).toBe("http://127.0.0.1:2222/");
+    expect(webviewUrl(project({ urlOverride: "http://127.0.0.1:1111" }), "http://example.com/")).toBe("http://127.0.0.1:1111");
+    expect(webviewUrl(project({ urlOverride: "" }), "http://example.com/")).toBeNull();
+    expect(webviewUrl(project({ urlOverride: "" }), undefined)).toBeNull();
+  });
+
+  it("a tab loads the instance's URL, looked up when the tab loads", async () => {
+    const { view, host } = setup([project({ urlOverride: "" })]);
+    let url: string | undefined = "http://127.0.0.1:8957/";
+    host.instanceUrl = () => url;
+    await view.setState({ slug: "live-captions" }, RESULT);
+    const webview = dom(view).all().find((e) => e.tag === "webview")!;
+    expect(webview.attrs.src).toBe("http://127.0.0.1:8957/");
+    url = undefined;
+    await view.setState({ slug: "live-captions" }, RESULT);
+    expect(dom(view).all().some((e) => e.tag === "webview")).toBe(false);
   });
 });
