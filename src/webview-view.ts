@@ -1,6 +1,7 @@
 import { ItemView, type Menu, type ViewStateResult, type WorkspaceLeaf } from "obsidian";
 import type { InstanceEvent, PopOutOutcome } from "./instance";
 import type { Project } from "./project";
+import type { InstanceState } from "./instance";
 import { stoppedPanelModel, type StoppedCause } from "./stopped-panel";
 import { isLoopbackUrl } from "./validation";
 
@@ -13,8 +14,14 @@ const POP_OUT_ICON = "external-link";
 export interface ViewHost {
   getProject(slug: string): Project | undefined;
   isWebviewAvailable(): boolean;
-  /** The loopback URL of the project's running app, or undefined when it is not running. */
+  /** The loopback URL of the project's running app, or undefined when it is not running (or has no web port yet). */
   instanceUrl?(slug: string): string | undefined;
+  /** The project's instance state, so a running app with no web port yet reads as waiting rather than stopped. */
+  instanceState?(slug: string): InstanceState | "none";
+  /** True while the launch check for apps left running is still going: a restored tab cannot tell yet whether its app is up. */
+  isAdopting?(): boolean;
+  /** G12: the app was given to the browser and that hold is still on, so a tab that cannot embed it need not open it again (E18). */
+  isOpenedInBrowser?(slug: string): boolean;
   /** Open a URL in the default browser. Only the fallback for a host that has no `popOut`. */
   openExternal(url: string): Promise<void>;
   /** G12: hand the running app to the default browser and hold it. The tab closes only when the outcome is `opened`. */
@@ -81,6 +88,8 @@ export class AppRunnerView extends ItemView {
   private poppingOut = false;
   /** True while the panel's Start is running, so a second click starts nothing. */
   private starting = false;
+  /** The cause the stopped panel last showed, so a redraw (a project edit) keeps it. */
+  private lastCause: StoppedCause = "not-running";
 
   constructor(leaf: WorkspaceLeaf, private readonly host: ViewHost) {
     super(leaf);
@@ -166,14 +175,21 @@ export class AppRunnerView extends ItemView {
     if (event.type === "ended") {
       if (event.cause === "start-failed" || this.mode === "message") return;
       await this.showStopped(event.cause === "crashed" ? "crashed" : "requested");
-    } else if (this.mode === "stopped" && this.host.instanceUrl?.(this.slug) !== undefined) {
-      await this.renderPage();
+    } else if (this.mode === "stopped") {
+      // The app is up (a page to load), or it is running without a port yet, or a waiting panel's wait is over: draw again.
+      const waiting = this.lastCause === "waiting" || this.lastCause === "checking";
+      if (this.host.instanceUrl?.(this.slug) !== undefined || waiting || this.host.instanceState?.(this.slug) === "running") await this.renderPage();
     }
   }
 
-  /** The project list changed (a rename, a delete): redraw a panel so it names the project, or drops Start when it is gone. */
+  /**
+   * The project list changed (a rename, a delete) or the launch check finished: redraw a panel so it names the project,
+   * or drops Start when it is gone. A stopped panel keeps the cause it showed; a waiting one looks again.
+   */
   async refresh(): Promise<void> {
-    if (this.mode === "stopped") await this.showStopped("not-running");
+    if (this.mode !== "stopped") return;
+    if (this.lastCause === "waiting" || this.lastCause === "checking") await this.renderPage();
+    else await this.showStopped(this.lastCause);
   }
 
   private async renderPage(): Promise<void> {
@@ -189,7 +205,10 @@ export class AppRunnerView extends ItemView {
     const live = this.host.instanceUrl?.(this.slug);
     const url = this.host.instanceUrl ? (live === undefined ? null : webviewUrl(project, live)) : webviewUrl(project);
     if (url === null) {
-      await this.showStopped("not-running");
+      // Running without a port yet (an app adopted mid-start) is waiting, not stopped; before the launch check ends we do not know.
+      const cause: StoppedCause =
+        this.host.instanceState?.(this.slug) === "running" ? "waiting" : this.host.isAdopting?.() === true ? "checking" : "not-running";
+      await this.showStopped(cause);
       return;
     }
     if (!this.host.isWebviewAvailable()) {
@@ -197,6 +216,12 @@ export class AppRunnerView extends ItemView {
       this.mode = "message";
       const notice = `This Obsidian window cannot embed web pages (webview is unavailable), so ${project.name} opened in your default browser instead.`;
       if (this.host.popOut) {
+        if (this.host.isOpenedInBrowser?.(this.slug)) {
+          // Another tab already gave the browser this app and the hold is on: close this one without opening it a second time.
+          this.host.notify(`${project.name} is already open in your default browser, so this tab was closed.`);
+          this.leaf.detach();
+          return;
+        }
         // The Held path (G12): the same hand-off as Pop out. If the browser could not be opened, that notice has said so and the tab stays.
         if (await this.popOut()) this.host.notify(notice);
         else this.showMessage(`This Obsidian window cannot embed web pages, so ${project.name} cannot be shown in this tab.`);
@@ -226,6 +251,7 @@ export class AppRunnerView extends ItemView {
   private async showStopped(cause: StoppedCause): Promise<void> {
     const token = ++this.renderToken;
     this.mode = "stopped";
+    this.lastCause = cause;
     const project = this.host.getProject(this.slug);
     let lines: string[] = [];
     if (project && this.host.logTail) {

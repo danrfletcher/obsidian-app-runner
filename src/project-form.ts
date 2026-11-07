@@ -18,6 +18,11 @@ export class ProjectForm {
     this.editingSlug = null;
   }
 
+  /** A project was deleted: if it is the one being edited the form goes back to Add, so Save cannot target a project that is gone. */
+  projectDeleted(slug: string): void {
+    if (this.editingSlug === slug) this.startAdd();
+  }
+
   startEdit(project: Project): void {
     this.values = {
       name: project.name,

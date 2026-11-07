@@ -5,6 +5,7 @@ import { BrowserMonitor } from "./browser-monitor";
 import type { BrowserReaderDeps } from "./browser-poller";
 import { realDefaultBrowser, realIsRunning, realOsascript } from "./browser-system";
 import { realClock } from "./clock";
+import { HELD_OPENED_IN_BROWSER } from "./held";
 import { InstanceManager, type InstanceDeps } from "./instance";
 import { KillTimer } from "./kill-timer";
 import { loopbackGet } from "./loopback-http";
@@ -39,7 +40,7 @@ export function registryProblemNotice(problem: RegistryProblem, movedTo: string 
 }
 
 /** Open a URL in the default browser: Electron's shell when reachable, else the window opener (Obsidian hands it to the OS). */
-async function openExternal(url: string): Promise<void> {
+export async function openExternal(url: string): Promise<void> {
   let shell: { openExternal(u: string): unknown } | undefined;
   try {
     shell = (window as unknown as { require?: (m: string) => { shell?: { openExternal(u: string): unknown } } }).require?.("electron")?.shell;
@@ -82,6 +83,13 @@ export default class AppRunnerPlugin extends Plugin {
   browserDeps: Partial<BrowserReaderDeps> = {};
   /** Replaces parts of the real process side (spawn, ps, lsof, the runtime folder). Tests set it before `onload`. */
   instanceDeps: Partial<InstanceDeps> = {};
+  /**
+   * G10: the launch check for apps left running. `onload` starts it and returns without waiting, so a slow or hung app
+   * cannot hold the plugin, the commands and the restored tabs back. Open and Stop wait for it (an Open before it ends
+   * must not start a second copy of an app it is about to adopt). Never rejects.
+   */
+  adopted: Promise<void> = Promise.resolve();
+  private adopting = false;
 
   async onload(): Promise<void> {
     // F2: macOS desktop only. Anywhere else the plugin loads, registers nothing and says so once.
@@ -148,6 +156,8 @@ export default class AppRunnerPlugin extends Plugin {
       isHeld: (slug) => this.instances.isHeld(slug),
       // An app adopted at launch is not judged until restored tabs are counted and the 15 s after layout ready have passed.
       suspended: (slug) => this.adoption?.suspended(slug) ?? false,
+      // A Stop that failed is not retried by the timer; the user's next Stop or Open clears it.
+      stopFailed: (slug) => this.instances.stopFailedOf(slug),
       killOnClose: (slug) => this.store.get(slug)?.killOnClose,
       stop: (slug) => this.instances.stop(slug),
       onInstanceChange: (listener) => this.instances.subscribe((e) => listener(e.slug)),
@@ -173,31 +183,29 @@ export default class AppRunnerPlugin extends Plugin {
       onSettled: (slug) => this.killTimer.evaluate(slug),
     });
     this.registerEvent(this.app.workspace.on("layout-change", () => this.sessions.refresh()));
-    // G10: take back what the last session left running before any restored tab asks for its URL. A failure here must not stop the plugin loading.
-    try {
-      await this.adoption.adoptAll();
-    } catch (e) {
-      notify(`App Runner could not check for apps left running: ${e instanceof Error ? e.message : String(e)}`);
-    }
-    // After adoption on purpose: when the layout is already ready this callback runs at once, and it must find the adopted apps.
-    this.app.workspace.onLayoutReady(() => {
-      this.sessions.refresh();
-      // Restored tabs are counted now; only then does adoption decide what to stop.
-      void this.adoption.layoutReady();
-    });
     const logs = createLogActions({ runtimeDir: runtime, exists: (file) => deps.fs.exists(file), shell: electronShell, notify });
 
     const viewHost: ViewHost = {
       getProject: (slug) => this.store.get(slug),
       instanceUrl: (slug) => this.instances.urlOf(slug),
+      instanceState: (slug) => this.instances.stateOf(slug),
+      isAdopting: () => this.adopting,
+      isOpenedInBrowser: (slug) => this.instances.heldReasonOf(slug) === HELD_OPENED_IN_BROWSER,
       subscribe: (listener) => this.instances.subscribe(listener),
-      // The panel's Start is the Open path; the tab that asked reloads itself when the instance is running (G9).
-      start: (slug) => this.instances.open(slug),
+      // The panel's Start is the Open path without the browser branch: the tab that asked reloads itself when the instance
+      // is running (G9), so Open-in-browser must not open a second page for it.
+      start: async (slug) => {
+        await this.adopted;
+        return this.instances.open(slug, { browser: false });
+      },
       logTail: (slug) => readLogTail(deps.fs, logPath(runtime, slug)),
       sessionsChanged: () => this.sessions.refresh(),
       isWebviewAvailable: () => isWebviewAvailable(),
       openExternal,
-      popOut: (slug) => this.instances.popOut(slug),
+      popOut: async (slug) => {
+        await this.adopted;
+        return this.instances.popOut(slug);
+      },
       notify: (m) => new Notice(m),
     };
     this.registerView(VIEW_TYPE_APP, (leaf) => new AppRunnerView(leaf, viewHost));
@@ -220,6 +228,8 @@ export default class AppRunnerPlugin extends Plugin {
       () => this.refreshTabTitles(),
       // G14: the Kill toggle applies to a running instance at once.
       (slug) => this.killTimer.evaluate(slug),
+      // G3: a deleted project's tabs close.
+      (slug) => this.closeTabsOf(slug),
     );
     this.manager.registerAll();
     const running: RunningListHost = {
@@ -244,6 +254,29 @@ export default class AppRunnerPlugin extends Plugin {
       showLog: (slug) => void logs.show(slug),
     };
     this.addSettingTab(new AppRunnerSettingTab(this.app, this, this.store, this.manager, logs, running));
+
+    // Last, so the view, the commands and the settings tab exist however long the check takes. A tab restored in the
+    // meantime shows "Checking" and redraws when the check ends.
+    this.adopting = true;
+    this.adopted = this.adoptLeftRunning(notify);
+  }
+
+  /** G10: take back what the last session left running, then (once the layout is ready) let adoption decide what to stop. */
+  private async adoptLeftRunning(notify: (message: string) => void): Promise<void> {
+    try {
+      await this.adoption.adoptAll();
+    } catch (e) {
+      // A failure here must not stop the plugin working.
+      notify(`App Runner could not check for apps left running: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    this.adopting = false;
+    // After adoption on purpose: when the layout is already ready this callback runs at once, and it must find the adopted apps.
+    this.app.workspace.onLayoutReady(() => {
+      this.sessions.refresh();
+      // Restored tabs are counted now; only then does adoption decide what to stop.
+      void this.adoption.layoutReady();
+    });
+    this.refreshTabTitles(); // tabs that were told "Checking" look again
   }
 
   /**
@@ -274,6 +307,7 @@ export default class AppRunnerPlugin extends Plugin {
 
   /** G5: start the app if needed, then open one tab on it. A second Open while it starts joins that start and adds no tab. */
   async openProject(slug: string): Promise<void> {
+    await this.adopted;
     const outcome = await this.instances.open(slug);
     if (outcome.kind !== "tab") return;
     const leaf = this.app.workspace.getLeaf("tab");
@@ -283,6 +317,7 @@ export default class AppRunnerPlugin extends Plugin {
   }
 
   async stopProject(slug: string): Promise<void> {
+    await this.adopted;
     await this.instances.stop(slug);
   }
 
@@ -297,6 +332,15 @@ export default class AppRunnerPlugin extends Plugin {
       return;
     }
     void view.popOut();
+  }
+
+  /** G3: close every App Runner tab of a project that was deleted. */
+  private closeTabsOf(slug: string): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_APP)) {
+      const state = leaf.getViewState().state as { slug?: unknown } | undefined;
+      if (state?.slug === slug) leaf.detach();
+    }
+    this.sessions.refresh();
   }
 
   private refreshTabTitles(): void {

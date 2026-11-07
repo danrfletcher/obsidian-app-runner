@@ -47,6 +47,10 @@ function rig(over: { kill?: boolean } = {}) {
     get maxPending() {
       return maxPending;
     },
+    /** Fake-clock timers that are not the 5 s member poll of the running app (that one is not the kill timer's). */
+    get killTimers() {
+      return w.clock.pendingTimers - m.memberPollCount;
+    },
     async start() {
       const opening = m.open(SLUG);
       await w.clock.settle();
@@ -205,7 +209,7 @@ describe("G14 the Kill toggle applies at once", () => {
     await r.w.clock.advance(5 * SECOND);
     r.setKill(false);
     expect(r.timer.isPending(SLUG)).toBe(false);
-    expect(r.w.clock.pendingTimers).toBe(0);
+    expect(r.killTimers).toBe(0);
     await r.w.clock.advance(3600 * SECOND);
     expect(r.stops).toEqual([]);
     expect(r.m.stateOf(SLUG)).toBe("running");
@@ -243,7 +247,7 @@ describe("G14 the Kill toggle applies at once", () => {
     r.setKill(false);
     r.setKill(true);
     expect(r.timer.pendingCount).toBe(1);
-    expect(r.w.clock.pendingTimers).toBe(1);
+    expect(r.killTimers).toBe(1);
     await r.w.clock.advance(14 * SECOND);
     expect(r.m.stateOf(SLUG)).toBe("running");
     await r.w.clock.advance(SECOND);
@@ -300,7 +304,7 @@ describe("edge cases around the timer", () => {
       await r.w.clock.advance(2 * SECOND);
     }
     expect(r.maxPending).toBe(1);
-    expect(r.w.clock.pendingTimers).toBe(1); // the fake clock's own list: no cancelled timer is left behind
+    expect(r.killTimers).toBe(1); // the fake clock's own list: no cancelled timer is left behind
     // The last close was 2 s ago, so 13 s more is the full 15 s.
     await r.w.clock.advance(12_999);
     expect(r.stops).toEqual([]);
@@ -319,7 +323,7 @@ describe("edge cases around the timer", () => {
       r.timer.evaluate(SLUG);
       r.m.setHeld(SLUG, false);
     }
-    expect(r.w.clock.pendingTimers).toBe(1);
+    expect(r.killTimers).toBe(1);
     await r.w.clock.advance(5 * SECOND);
     await r.w.clock.advance(2 * SECOND); // let the stop that just began finish
     expect(r.m.stateOf(SLUG)).toBe("none");

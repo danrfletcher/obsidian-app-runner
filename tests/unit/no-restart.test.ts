@@ -48,7 +48,7 @@ describe("F4 no auto-restart code path", () => {
     const main = files.find((f) => f.name === "main.ts")!.text;
     const hits = [...main.matchAll(/this\.instances\.open\(/g)].length;
     expect(hits).toBe(2); // openProject (command, list) and the host's start (panel button)
-    expect(main).toMatch(/start: \(slug\) => this\.instances\.open\(slug\)/);
+    expect(main).toMatch(/start: async \(slug\) => \{\s*await this\.adopted;\s*return this\.instances\.open\(slug, \{ browser: false \}\);/);
   });
 
   it("the instance manager's exit handler on a crash does not call open or spawn again", () => {

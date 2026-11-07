@@ -77,15 +77,28 @@ export async function waitForReady(o: ReadyWaitOptions): Promise<ReadyResult> {
     else o.signal.addEventListener("abort", () => resolve("aborted"), { once: true });
   });
   const probeDeps = { httpGet: o.httpGet, clock: o.clock, timeoutMs: o.probeTimeoutMs };
+  // A `ps` or `lsof` that never comes back must not hold the start past the deadline: each look races it.
+  const late = Symbol("late");
+  const beforeDeadline = <T>(look: Promise<T>): Promise<T | typeof late> =>
+    new Promise((resolve, reject) => {
+      const cancel = o.clock.after(Math.max(0, deadline - o.clock.now()), () => resolve(late));
+      look.then(
+        (v) => (cancel(), resolve(v)),
+        (e) => (cancel(), reject(e)),
+      );
+    });
 
   while (o.clock.now() < deadline) {
     if (o.signal.aborted) return { kind: "cancelled" };
-    const pids = await o.members();
+    const pids = await beforeDeadline(o.members());
     if (o.signal.aborted) return { kind: "cancelled" };
+    if (pids === late) return { kind: "timeout" };
     if (pids.length === 0) return { kind: "exited" };
 
-    const candidates = loopbackCandidates(await o.listeners(pids));
+    const listening = await beforeDeadline(o.listeners(pids));
     if (o.signal.aborted) return { kind: "cancelled" };
+    if (listening === late) return { kind: "timeout" };
+    const candidates = loopbackCandidates(listening);
     const targets = o.urlOverride
       ? candidates.filter((c) => c.port === portOf(o.urlOverride!)).map((c) => ({ port: c.port, url: o.urlOverride! }))
       : candidates.map((c) => ({ port: c.port, url: `http://${c.host}:${c.port}/` }));

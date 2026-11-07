@@ -242,3 +242,39 @@ describe("waitForReady", () => {
     });
   });
 });
+
+describe("a ps or lsof look that never comes back", () => {
+  it("members() hanging: the wait ends at the deadline with a timeout, not later", async () => {
+    const clock = new FakeClock();
+    const http = fakeHttp(clock, () => res());
+    const start = clock.now();
+    const result = await clock.run(waitForReady(opts(clock, http.get, { members: () => new Promise<number[]>(() => {}), timeoutMs: 5000 })));
+    expect(result).toEqual({ kind: "timeout" });
+    expect(clock.now() - start).toBe(5000);
+    expect(clock.pendingTimers).toBe(0); // the deadline timer is cancelled or fired, none left behind
+  });
+
+  it("listeners() hanging: the same", async () => {
+    const clock = new FakeClock();
+    const http = fakeHttp(clock, () => res());
+    const start = clock.now();
+    const result = await clock.run(waitForReady(opts(clock, http.get, { listeners: () => new Promise<Listener[]>(() => {}), timeoutMs: 5000 })));
+    expect(result).toEqual({ kind: "timeout" });
+    expect(clock.now() - start).toBe(5000);
+    expect(http.requests).toEqual([]);
+  });
+
+  it("a look that answers in time is not cut short", async () => {
+    const clock = new FakeClock();
+    const http = fakeHttp(clock, () => res());
+    const result = await clock.run(waitForReady(opts(clock, http.get)));
+    expect(result).toMatchObject({ kind: "ready", port: 8957 });
+  });
+
+  it("a look that fails still fails the wait (the caller reports it)", async () => {
+    const clock = new FakeClock();
+    const http = fakeHttp(clock, () => res());
+    await expect(clock.run(waitForReady(opts(clock, http.get, { members: async () => Promise.reject(new Error("ps failed")) })))).rejects.toThrow("ps failed");
+    expect(clock.pendingTimers).toBe(0);
+  });
+});

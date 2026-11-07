@@ -176,6 +176,17 @@ describe("rows (G2, G3)", () => {
     expect(plugin.commands.size).toBe(0);
   });
 
+  it("deleting the project that is open in the Edit form puts the form back to Add, so Save cannot target a project that is gone", async () => {
+    const { row, store, field } = await withRow();
+    await row.buttons.find((b) => b.text === "Edit")!.handler!();
+    expect(field("Edit project")).toBeDefined();
+    await row.buttons.find((b) => b.text === "Delete")!.handler!();
+    expect(store.projects).toEqual([]);
+    // The redraw after the delete is the last render: its form heading is Add, not Edit.
+    const headings = Setting.all.filter((x) => x.name === "Edit project" || x.name === "Add project").map((x) => x.name);
+    expect(headings.at(-1)).toBe("Add project");
+  });
+
   it("Delete on a running project asks first; Cancel keeps it, Stop and delete removes it", async () => {
     const { row, store } = await withRow({ isRunning: () => true, removeRuntime: async () => {} });
     const pending = row.buttons.find((b) => b.text === "Delete")!.handler!();

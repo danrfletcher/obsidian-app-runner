@@ -324,8 +324,9 @@ describe("failures leave the tab and the app alone", () => {
     const { w, l } = await plugin({});
     await openApp(w, l);
     const view = await mountTab(l);
-    // The instance has no address (the app stopped answering and was never rediscovered).
+    // The instance has no address (the app stopped answering and was never rediscovered): Pop out looks once more and finds nothing.
     (l.plugin.instances as unknown as { instances: Map<string, { url: string | null }> }).instances.get(SLUG)!.url = null;
+    w.answers.delete(8957);
     Notice.reset();
 
     expect(await view.popOut()).toBe(false);

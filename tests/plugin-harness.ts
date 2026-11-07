@@ -23,6 +23,8 @@ export interface LaunchOptions {
   runtimeFs?: InstanceDeps["fs"];
   /** The browser the poll sees. Default: the default browser is Brave and it is not running, so no tab is ever read. */
   browser?: FakeBrowser;
+  /** Wait for the launch check for apps left running before returning (default). False: return as `onload` does, with the check still going. */
+  waitForAdoption?: boolean;
 }
 
 /**
@@ -76,6 +78,7 @@ export async function launch(world: FakeWorld, opts: LaunchOptions = {}) {
   plugin.browserDeps = browser.deps(); // a test never reaches the real osascript, plutil or lsappinfo
   opts.configure?.(plugin);
   await plugin.onload();
+  if (opts.waitForAdoption !== false) await plugin.adopted; // onload does not wait for the launch check; most tests want the apps it adopts
   const tab = plugin.settingTabs[0] as AppRunnerSettingTab;
   return {
     plugin,

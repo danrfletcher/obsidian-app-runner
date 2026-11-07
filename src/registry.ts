@@ -27,6 +27,8 @@ export interface RegistryEntry {
    */
   held?: boolean;
   heldReason?: string;
+  /** G13: the 30 s hold for the browser had already ended when this was written (only with `held`). */
+  holdOver?: boolean;
 }
 
 export const REGISTRY_VERSION = 1;
@@ -95,6 +97,7 @@ export function parseEntry(v: unknown): RegistryEntry | null {
   if (v.held === true) {
     entry.held = true;
     entry.heldReason = typeof v.heldReason === "string" ? v.heldReason.trim().slice(0, MAX_HELD_REASON_LENGTH) : "";
+    if (v.holdOver === true) entry.holdOver = true;
   }
   return entry;
 }

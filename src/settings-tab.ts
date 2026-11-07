@@ -155,11 +155,12 @@ export class AppRunnerSettingTab extends PluginSettingTab {
           .setButtonText("Delete")
           .setWarning()
           .onClick(async () => {
-            await this.manager.delete(project.slug, (p) => {
+            const outcome = await this.manager.delete(project.slug, (p) => {
               const modal = new ConfirmStopDeleteModal(this.app, p);
               modal.open();
               return modal.result;
             });
+            if (outcome !== "cancelled") this.form.projectDeleted(project.slug);
             this.display();
           }),
       );
