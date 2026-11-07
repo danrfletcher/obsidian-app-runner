@@ -1,0 +1,24 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>App Runner webview spike: getUserMedia</title>
+<body>
+<pre id="out">running...</pre>
+<script>
+  // Asks for the microphone and reports the outcome on the console (the host reads it through the webview's
+  // console-message event) and on the page.
+  (async () => {
+    const result = { secureContext: window.isSecureContext, hasMediaDevices: !!navigator.mediaDevices };
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      result.outcome = "granted";
+      result.tracks = stream.getAudioTracks().map((t) => ({ label: t.label, state: t.readyState }));
+      stream.getTracks().forEach((t) => t.stop());
+    } catch (e) {
+      result.outcome = "rejected";
+      result.error = `${e && e.name}: ${e && e.message}`;
+    }
+    const text = JSON.stringify(result);
+    document.getElementById("out").textContent = text;
+    console.log("GUM-RESULT " + text);
+  })();
+</script>
