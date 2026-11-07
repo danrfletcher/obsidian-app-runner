@@ -11,6 +11,7 @@ const info = (over: Partial<InstanceInfo> = {}): InstanceInfo => ({
   startedAt: new Date(2026, 10, 7, 9, 5, 7).getTime(),
   held: false,
   heldReason: "",
+  adopted: false,
   ...over,
 });
 

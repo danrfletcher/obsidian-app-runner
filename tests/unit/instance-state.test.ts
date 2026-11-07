@@ -622,32 +622,12 @@ describe("a running app that dies by itself", () => {
   });
 });
 
-describe("unload and delete", () => {
-  it("stopAllNow sends SIGTERM to every group synchronously", async () => {
-    const w = new FakeWorld();
-    const { m } = await startApp(w);
-    const leader = w.leaderPid();
-    m.stopAllNow();
-    expect(w.signals).toEqual([[-leader, "SIGTERM"]]);
-    await w.clock.advance(500);
-    expect(m.stateOf(SLUG)).toBe("none");
-    expect(w.registry.entries.size).toBe(0);
-  });
-
-  it("a SIGKILL follows 5 s later for a group that ignores SIGTERM", async () => {
-    const w = new FakeWorld();
-    w.nextLeader = { ignoresTerm: true };
-    const { m } = await startApp(w);
-    m.stopAllNow();
-    await w.clock.advance(5200);
-    expect(w.signals.map(([, s]) => s)).toEqual(["SIGTERM", "SIGKILL"]);
-  });
-
+describe("delete", () => {
   it("removeRuntime removes the log and the registry entry of a stopped project", async () => {
     const w = new FakeWorld();
     const m = w.manager();
     w.logs.set(LOG, "old");
-    w.registry.entries.set(SLUG, { slug: SLUG, pid: 1, pgid: 1, members: [], port: null, startedAt: 0 });
+    w.registry.entries.set(SLUG, { slug: SLUG, pid: 1, pgid: 1, members: [], port: null, startedAt: 0, browserSessionExpected: false });
     await m.removeRuntime(project());
     expect(w.logs.has(LOG)).toBe(false);
     expect(w.registry.entries.size).toBe(0);

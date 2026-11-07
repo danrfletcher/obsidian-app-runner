@@ -197,7 +197,7 @@ describe("the commands in this PR", () => {
     expect(Notice.messages.at(-1)).toBe("Stopped Live Captions.");
   });
 
-  it("unloading the plugin sends SIGTERM to the app's group at once, and only to that group (F11)", async () => {
+  it("unloading the plugin leaves the app running and sends no signal at all (G15)", async () => {
     const { plugin, world } = await loaded();
     world.addProc(4242, 4242); // Dan's own process
     const opening = plugin.openProject("live-captions");
@@ -206,9 +206,9 @@ describe("the commands in this PR", () => {
     await world.clock.run(opening);
     const leader = world.leaderPid();
     plugin.onunload();
-    expect(world.signals).toEqual([[-leader, "SIGTERM"]]);
-    await world.clock.advance(500);
-    expect(world.procs.map((p) => p.pid)).toEqual([4242]);
+    await world.clock.advance(60_000);
+    expect(world.signals).toEqual([]);
+    expect(world.procs.map((p) => p.pid).sort()).toEqual([4242, leader].sort());
   });
 
   it("unloading with nothing running signals nothing", async () => {

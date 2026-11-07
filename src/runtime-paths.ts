@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -26,4 +27,36 @@ export function logPath(runtime: string, slug: string): string {
 
 export function registryPath(runtime: string): string {
   return path.join(runtime, "running.json");
+}
+
+/** The path with symlinks resolved as far as the file system allows (a folder that does not exist yet is resolved by its parent). */
+function resolveReal(p: string): string {
+  let current = path.resolve(p);
+  const rest: string[] = [];
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync(current), ...rest);
+    } catch {
+      const parent = path.dirname(current);
+      if (parent === current) return path.resolve(p);
+      rest.unshift(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
+/** True when `child` is `parent` or lies anywhere beneath it. */
+export function isInside(child: string, parent: string): boolean {
+  const relative = path.relative(resolveReal(parent), resolveReal(child));
+  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+/**
+ * F16: no runtime state (pids, logs, the registry) inside the vault, which is git-tracked and pushed. Throws when the
+ * runtime directory is the vault or beneath it.
+ */
+export function assertOutsideVault(runtime: string, vaultRoot: string): void {
+  if (isInside(runtime, vaultRoot)) {
+    throw new Error(`Refusing to keep runtime state at ${runtime}: it is inside the vault at ${vaultRoot}.`);
+  }
 }

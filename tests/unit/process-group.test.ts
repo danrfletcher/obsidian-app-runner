@@ -134,7 +134,7 @@ describe("stopGroup: SIGTERM then SIGKILL (E8)", () => {
     const clock = new FakeClock();
     let rows = initial;
     const sent: Array<[number, Signal]> = [];
-    const table: ProcessTable = { snapshot: async () => rows };
+    const table: ProcessTable = { snapshotScoped: async () => rows };
     return {
       clock,
       sent,
@@ -231,24 +231,5 @@ describe("stopGroup: SIGTERM then SIGKILL (E8)", () => {
     const out = await w.clock.run(stopGroup({ pgid: 5000, members: [{ pid: 5000, startTime: T0 }], table: w.table, kill, clock: w.clock }));
     expect(out).toBe("killed");
     expect(w.sent.map(([, s]) => s)).toEqual(["SIGTERM", "SIGKILL"]);
-  });
-
-  it("immediate mode signals before any ps (plugin unload)", async () => {
-    const order: string[] = [];
-    const w = world([{ pid: 5000, pgid: 5000, startTime: T0 }]);
-    const table: ProcessTable = {
-      snapshot: async () => {
-        order.push("ps");
-        return [{ pid: 5000, pgid: 5000, startTime: T0 }];
-      },
-    };
-    const kill: KillFn = (_p, sig) => {
-      order.push(sig);
-      w.set([]);
-    };
-    const promise = stopGroup({ pgid: 5000, members: [], table, kill, clock: w.clock, leaderAlive: () => true, immediate: true, graceMs: 100 });
-    expect(order[0]).toBe("SIGTERM"); // sent synchronously, before the first ps
-    await w.clock.run(promise);
-    expect(order.slice(0, 2)).toEqual(["SIGTERM", "ps"]);
   });
 });

@@ -35,7 +35,7 @@ describe("F16 runtime paths are outside the vault", () => {
 });
 
 describe("Registry (a real file)", () => {
-  const entry = (slug: string, pid = 10): RegistryEntry => ({ slug, pid, pgid: pid, members: [{ pid, startTime: "t" }], port: null, startedAt: 1 });
+  const entry = (slug: string, pid = 10): RegistryEntry => ({ slug, pid, pgid: pid, members: [{ pid, startTime: "t" }], port: null, startedAt: 1, browserSessionExpected: false });
 
   it("round-trips entries, written whole with owner-only permissions", async () => {
     const file = path.join(tmp, "a", "running.json");
@@ -78,7 +78,7 @@ describe("Registry (a real file)", () => {
   it("entries that fail validation are dropped on read", async () => {
     const dir = path.join(tmp, "e");
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, "running.json"), JSON.stringify({ version: 1, entries: { ok: entry("ok"), bad: { slug: "bad", pid: "x" }, liar: entry("other") } }));
+    fs.writeFileSync(path.join(dir, "running.json"), JSON.stringify({ version: 1, entries: { ok: entry("ok"), bad: { slug: "bad", pid: "x" }, "../escape": entry("../escape") } }));
     expect(Object.keys((await new Registry(path.join(dir, "running.json")).read()).entries)).toEqual(["ok"]);
   });
 });

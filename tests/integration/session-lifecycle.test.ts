@@ -254,7 +254,7 @@ describe("open, duplicate, close, grace, stop (GP4, GP5)", () => {
 
 describe("crash (G9)", () => {
   it("an app that exits on its own is reported once, dropped from the list and its registry entry, and never restarted", async () => {
-    const r = rig("--noise 12 --crash-after 600");
+    const r = rig("--noise 12 --crash-after 2500");
     await r.open();
     const pgid = await r.pgid();
     expect(r.m.stateOf(SLUG)).toBe("running");

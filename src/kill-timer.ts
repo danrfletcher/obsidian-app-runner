@@ -10,6 +10,11 @@ export interface KillTimerDeps {
   sessionCount(slug: string): number;
   stateOf(slug: string): InstanceState | "none";
   isHeld(slug: string): boolean;
+  /**
+   * True while something else is deciding whether this project's app should stop. An app adopted at launch waits for
+   * layout ready + 15 s (so restored tabs have been counted); the timer must not start before that decision is made.
+   */
+  suspended?(slug: string): boolean;
   /** The project's Kill-when-all-tabs-closed toggle as stored now; undefined when the project is gone. */
   killOnClose(slug: string): boolean | undefined;
   /** Stop the instance (the same call as the Stop command). */
@@ -23,9 +28,9 @@ export interface KillTimerDeps {
 
 /**
  * G14: one pending timer per project at most. A project is "due" when its instance is running, Kill is on, it is not
- * Held, and it has no sessions. Becoming due arms the timer; ceasing to be due (a tab opens, Kill goes off, the instance
- * is Held, stops, crashes or never reached running) cancels it. When the timer fires the conditions are checked again
- * before the one `stop` call.
+ * Held, has not been suspended by the adoption decision, and has no sessions. Becoming due arms the timer; ceasing to be
+ * due (a tab opens, Kill goes off, the instance is Held, stops, crashes or never reached running) cancels it. When the
+ * timer fires the conditions are checked again before the one `stop` call.
  *
  * `evaluate(slug)` is the only way anything changes: it is idempotent, so any number of events leave one timer.
  * An instance that failed to start never reaches `running`, so it never arms one; a crash ends the instance, which
@@ -55,7 +60,7 @@ export class KillTimer {
 
   private isDue(slug: string): boolean {
     const d = this.deps;
-    return d.stateOf(slug) === "running" && d.killOnClose(slug) === true && !d.isHeld(slug) && d.sessionCount(slug) === 0;
+    return d.stateOf(slug) === "running" && d.killOnClose(slug) === true && !d.isHeld(slug) && d.suspended?.(slug) !== true && d.sessionCount(slug) === 0;
   }
 
   /** Arm, keep or cancel the project's timer to match the rule. A timer already running is kept, not restarted. */

@@ -1,10 +1,11 @@
 import type { Clock } from "./clock";
 import type { HttpGet } from "./loopback-http";
-import { parseLsof, type LsofRunner } from "./port-discovery";
+import { LivenessPoll, type LivenessVerdict } from "./liveness-poll";
+import { choosePort, loopbackCandidates, parseLsof, type Answer, type LsofRunner } from "./port-discovery";
 import { isOwned, membersOf, mergeMembers, stopGroup, type KillFn, type Member, type ProcessTable } from "./process-group";
 import type { Project } from "./project";
-import { waitForReady } from "./ready-wait";
-import type { RegistryEntry, RegistryLike } from "./registry";
+import { probe, waitForReady } from "./ready-wait";
+import type { RegistryEntry, RegistryStore } from "./registry";
 import type { RuntimeFs } from "./runtime-fs";
 import { logPath } from "./runtime-paths";
 import type { RuntimeSeams } from "./seams";
@@ -51,6 +52,8 @@ export interface InstanceInfo {
   startedAt: number;
   held: boolean;
   heldReason: string;
+  /** G7, G10: found in the registry at launch ("Still running from last session"), not started in this session. */
+  adopted: boolean;
 }
 
 type StartResult = { kind: "ready"; url: string } | { kind: "failed" } | { kind: "cancelled" };
@@ -80,6 +83,10 @@ interface Instance {
   /** Held instances are never auto-stopped (G14). Set by whoever holds it; this PR only reads it. */
   held: boolean;
   heldReason: string;
+  /** G10: found in the registry at launch. It is not our child, so only the 5 s liveness poll can tell that it died. */
+  adopted: boolean;
+  /** G13: persisted in the registry so the browser poll can resume at relaunch. This PR only stores it. */
+  browserSessionExpected: boolean;
 }
 
 export interface InstanceDeps {
@@ -102,10 +109,22 @@ export interface InstanceDeps {
   kill: KillFn;
   http: HttpGet;
   clock: Clock;
-  registry: RegistryLike;
-  /** Timings, overridable by tests. Defaults: 5 s grace, 60 s ready timeout. */
+  registry: RegistryStore;
+  /** Timings, overridable by tests. Defaults: 5 s grace, 60 s ready timeout, 5 s liveness poll. */
   graceMs?: number;
   readyTimeoutMs?: number;
+  livenessMs?: number;
+}
+
+/** How an app was reached after launch: its port and page, or null while it listens on nothing we can reach yet. */
+export interface Rediscovery {
+  port: number;
+  url: string;
+}
+
+export interface StopOptions {
+  /** Adoption stops several apps and tells the user once; it asks Stop not to say "Stopped X." for each. */
+  silent?: boolean;
 }
 
 /**
@@ -118,14 +137,21 @@ export interface InstanceDeps {
  * - The instance is created synchronously in the first Open, before anything is awaited, so two Opens in one tick, or
  *   either side of an await, make one spawn (E20).
  * - A failed start stops the group, removes the registry entry and clears the instance, so the next Open is clean (G6).
+ * - An adopted instance (found in the registry at launch) is running from the start. It is not our child, so a 5 s
+ *   liveness poll looks for a recorded member that is still alive; when there is none the app has died (E21).
+ * - Nothing here stops an app because Obsidian is quitting or the plugin is unloading (G15): `dispose` only lets go.
  *
  * It is the `RuntimeSeams` the project manager uses to know whether a project is running and to clean up on delete.
  */
 export class InstanceManager implements RuntimeSeams {
   private readonly instances = new Map<string, Instance>();
   private readonly listeners = new Set<(event: InstanceEvent) => void>();
+  private readonly liveness: LivenessPoll;
+  private disposed = false;
 
-  constructor(private readonly deps: InstanceDeps) {}
+  constructor(private readonly deps: InstanceDeps) {
+    this.liveness = new LivenessPoll({ clock: deps.clock, check: (slug) => this.checkAdopted(slug), intervalMs: deps.livenessMs });
+  }
 
   /** Hear about instances appearing, changing and ending. Returns the unsubscribe. */
   subscribe(listener: (event: InstanceEvent) => void): () => void {
@@ -137,12 +163,28 @@ export class InstanceManager implements RuntimeSeams {
     return this.listeners.size;
   }
 
-  /** Plugin unload: forget every subscriber. Instances are not touched. */
+  /** Forget every subscriber. Instances are not touched. */
   clearListeners(): void {
     this.listeners.clear();
   }
 
+  /**
+   * Plugin unload or disable (G15). Apps keep running and the registry is left exactly as it is: the liveness poll is
+   * cancelled, a start still waiting for its port stops waiting (its entry was written at spawn, so the next launch
+   * adopts it), and no listener is called again. Nothing is signalled and nothing is written from here on.
+   */
+  dispose(): void {
+    this.disposed = true;
+    this.liveness.dispose();
+    for (const inst of this.instances.values()) {
+      inst.abort.abort();
+      inst.resolveReady({ kind: "cancelled" });
+    }
+    this.listeners.clear();
+  }
+
   private emit(event: InstanceEvent): void {
+    if (this.disposed) return;
     for (const listener of [...this.listeners]) {
       try {
         listener(event);
@@ -161,6 +203,11 @@ export class InstanceManager implements RuntimeSeams {
     return this.instances.has(slug);
   }
 
+  /** G7: the instance was found in the registry at launch rather than started in this session. */
+  isAdopted(slug: string): boolean {
+    return this.instances.get(slug)?.adopted ?? false;
+  }
+
   /** G14: a Held instance is never auto-stopped. */
   isHeld(slug: string): boolean {
     return this.instances.get(slug)?.held ?? false;
@@ -175,6 +222,19 @@ export class InstanceManager implements RuntimeSeams {
     this.emit({ type: "changed", slug });
   }
 
+  /** G13: whether a browser session is expected for the app; saved in the registry so it survives a relaunch. */
+  browserSessionExpected(slug: string): boolean {
+    return this.instances.get(slug)?.browserSessionExpected ?? false;
+  }
+
+  /** Record that a browser session is (or is no longer) expected. A failed write leaves the earlier entry in place. */
+  async setBrowserSessionExpected(slug: string, expected: boolean): Promise<void> {
+    const inst = this.instances.get(slug);
+    if (!inst || inst.browserSessionExpected === expected) return;
+    inst.browserSessionExpected = expected;
+    if (inst.pgid > 0 && inst.state !== "stopping") await this.deps.registry.set(this.entryOf(inst)).catch(() => undefined);
+  }
+
   /** Every instance as the running list shows it, in the order they were created. */
   snapshots(): InstanceInfo[] {
     return [...this.instances.values()].map((i) => ({
@@ -186,6 +246,7 @@ export class InstanceManager implements RuntimeSeams {
       startedAt: i.startedAt,
       held: i.held,
       heldReason: i.heldReason,
+      adopted: i.adopted,
     }));
   }
 
@@ -207,8 +268,17 @@ export class InstanceManager implements RuntimeSeams {
       const inst = this.instances.get(slug);
       if (!inst) return this.beginStart(project);
       switch (inst.state) {
-        case "running":
-          return this.arrive(slug, inst.url!);
+        case "running": {
+          if (inst.url === null) {
+            // An adopted app whose port is not known yet: look once more before giving up.
+            await this.rediscover(slug);
+            if (inst.url === null) {
+              this.deps.notify(`${project.name} is running but has not opened a web port yet. Try again in a moment.`);
+              return { kind: "failed" };
+            }
+          }
+          return this.arrive(slug, inst.url);
+        }
         case "starting": {
           const result = await inst.ready;
           return result.kind === "ready" ? { kind: "joined" } : { kind: result.kind };
@@ -256,6 +326,8 @@ export class InstanceManager implements RuntimeSeams {
       endCause: "requested",
       held: false,
       heldReason: "",
+      adopted: false,
+      browserSessionExpected: false,
     };
     this.instances.set(project.slug, inst);
     this.deps.notify(`Starting ${project.name}`);
@@ -285,7 +357,7 @@ export class InstanceManager implements RuntimeSeams {
       }
       inst.pgid = child.pid;
 
-      const rows = await this.deps.table.snapshot();
+      const rows = await this.deps.table.snapshotScoped({ pids: [inst.pgid], pgids: [inst.pgid] });
       if (inst.cancelled) return;
       if (!rows.some((r) => r.pid === inst.pgid && r.pgid === inst.pgid)) {
         // Gone before the first look: the shell failed at once (E2).
@@ -297,8 +369,8 @@ export class InstanceManager implements RuntimeSeams {
       // The entry exists from spawn. If it cannot be written the app is stopped: nothing untracked is left running.
       try {
         await this.deps.registry.set(this.entryOf(inst));
-      } catch {
-        if (!inst.cancelled) await this.fail(inst, { kind: "registry-failed" });
+      } catch (e) {
+        if (!inst.cancelled) await this.fail(inst, { kind: "registry-failed", message: e instanceof Error ? e.message : String(e) });
         return;
       }
       if (inst.cancelled) return;
@@ -315,6 +387,7 @@ export class InstanceManager implements RuntimeSeams {
         timeoutMs: this.deps.readyTimeoutMs,
       });
       if (inst.state === "stopping") return; // Stop took over; it resolves the start
+      if (this.disposed) return; // unloaded while waiting: the app keeps running and the next launch adopts it (G15)
 
       if (result.kind === "ready") {
         inst.port = result.port;
@@ -335,7 +408,15 @@ export class InstanceManager implements RuntimeSeams {
   }
 
   private entryOf(inst: Instance): RegistryEntry {
-    return { slug: inst.slug, pid: inst.pgid, pgid: inst.pgid, members: inst.members, port: inst.port, startedAt: inst.startedAt };
+    return {
+      slug: inst.slug,
+      pid: inst.pgid,
+      pgid: inst.pgid,
+      members: inst.members,
+      port: inst.port,
+      startedAt: inst.startedAt,
+      browserSessionExpected: inst.browserSessionExpected,
+    };
   }
 
   /**
@@ -343,13 +424,13 @@ export class InstanceManager implements RuntimeSeams {
    * members we had not seen yet are recorded too (and written to the registry). Empty when the group is gone.
    */
   private async refreshMembers(inst: Instance): Promise<number[]> {
-    const rows = await this.deps.table.snapshot();
+    const rows = await this.deps.table.snapshotScoped({ pids: inst.members.map((m) => m.pid), pgids: [inst.pgid] });
     if (!isOwned(rows, inst.pgid, inst.members)) return [];
     const current = membersOf(rows, inst.pgid);
     const merged = mergeMembers(inst.members, current);
     if (merged.length !== inst.members.length) {
       inst.members = merged;
-      if (inst.state !== "stopping" && this.instances.get(inst.slug) === inst) {
+      if (inst.state !== "stopping" && !this.disposed && this.instances.get(inst.slug) === inst) {
         void this.deps.registry.set(this.entryOf(inst)).catch(() => undefined);
       }
     }
@@ -358,30 +439,36 @@ export class InstanceManager implements RuntimeSeams {
 
   /** The leader exited. Record whoever is left in the group; a running app with nobody left is gone. */
   private onChildExit(inst: Instance): void {
-    if (inst.pgid === 0) return;
+    if (inst.pgid === 0 || this.disposed) return;
     void this.refreshMembers(inst)
       .then(async (alive) => {
         if (inst.state !== "running" || alive.length > 0 || this.instances.get(inst.slug) !== inst) return;
-        // The app exited by itself: no Stop was requested (a Stop moves the state to stopping first). Nothing restarts it (F4).
-        inst.endCause = "crashed";
-        this.instances.delete(inst.slug);
-        this.emit({ type: "ended", slug: inst.slug, cause: "crashed" });
-        await this.deps.registry.remove(inst.slug).catch(() => undefined);
-        this.deps.notify(`${inst.project.name} stopped on its own.`);
+        await this.markDied(inst);
       })
       .catch(() => undefined);
+  }
+
+  /** The app exited by itself: no Stop was requested (a Stop moves the state to stopping first). Nothing restarts it (F4). */
+  private async markDied(inst: Instance): Promise<void> {
+    inst.endCause = "crashed";
+    this.instances.delete(inst.slug);
+    this.liveness.unwatch(inst.slug);
+    this.emit({ type: "ended", slug: inst.slug, cause: "crashed" });
+    await this.deps.registry.remove(inst.slug).catch(() => undefined);
+    this.deps.notify(`${inst.project.name} stopped on its own.`);
   }
 
   /** A start that failed: the notice (with the log lines) first, then the group is stopped and the instance cleared. */
   private async fail(inst: Instance, failure: StartFailure): Promise<void> {
     if (inst.state === "stopping") return;
     inst.state = "stopping";
+    this.liveness.unwatch(inst.slug);
     inst.endCause = "start-failed";
     inst.abort.abort();
     this.emit({ type: "changed", slug: inst.slug });
     inst.stopped = (async () => {
       this.deps.notify(startFailureNotice(inst.project.name, failure, await this.deps.fs.readTail(inst.logFile, LOG_TAIL_BYTES)));
-      await this.killAndClean(inst, false);
+      await this.killAndClean(inst);
     })();
     await inst.stopped;
     inst.resolveReady({ kind: "failed" });
@@ -389,7 +476,7 @@ export class InstanceManager implements RuntimeSeams {
 
   // ---- Stop -------------------------------------------------------------------------------------------------------
 
-  async stop(slug: string): Promise<StopResult> {
+  async stop(slug: string, options: StopOptions = {}): Promise<StopResult> {
     const inst = this.instances.get(slug);
     if (!inst) {
       this.deps.notify(`Nothing running for ${this.deps.getProject(slug)?.name ?? slug}.`);
@@ -400,24 +487,25 @@ export class InstanceManager implements RuntimeSeams {
       return "waited";
     }
     const cancelling = inst.state === "starting";
-    this.beginStop(inst, cancelling, false);
+    this.beginStop(inst, cancelling);
     await inst.stopped;
-    this.deps.notify(cancelling ? `Cancelled starting ${inst.project.name}.` : `Stopped ${inst.project.name}.`);
+    if (!options.silent) this.deps.notify(cancelling ? `Cancelled starting ${inst.project.name}.` : `Stopped ${inst.project.name}.`);
     return cancelling ? "cancelled" : "stopped";
   }
 
-  private beginStop(inst: Instance, cancelling: boolean, immediate: boolean): void {
+  private beginStop(inst: Instance, cancelling: boolean): void {
     inst.state = "stopping";
+    this.liveness.unwatch(inst.slug);
     inst.cancelled = inst.cancelled || cancelling;
     inst.abort.abort();
     this.emit({ type: "changed", slug: inst.slug });
-    inst.stopped = this.killAndClean(inst, immediate).then(() => {
+    inst.stopped = this.killAndClean(inst).then(() => {
       if (cancelling) inst.resolveReady({ kind: "cancelled" });
     });
   }
 
   /** Stop the group, then take the registry entry and the instance away. A group that could not be stopped keeps its entry. */
-  private async killAndClean(inst: Instance, immediate: boolean): Promise<void> {
+  private async killAndClean(inst: Instance): Promise<void> {
     let stopFailed = false;
     if (inst.pgid > 0) {
       try {
@@ -428,7 +516,6 @@ export class InstanceManager implements RuntimeSeams {
           kill: this.deps.kill,
           clock: this.deps.clock,
           leaderAlive: () => this.leaderAlive(inst),
-          immediate,
           graceMs: this.deps.graceMs,
         });
       } catch (e) {
@@ -448,11 +535,115 @@ export class InstanceManager implements RuntimeSeams {
     return !!c && c.pid !== undefined && !inst.errored && c.exitCode === null && c.signalCode === null;
   }
 
-  /** Obsidian is unloading (until adoption lands, apps do not outlive it): SIGTERM every group now, SIGKILL after the grace. */
-  stopAllNow(): void {
-    for (const inst of [...this.instances.values()]) {
-      if (inst.state !== "stopping") this.beginStop(inst, inst.state === "starting", true);
+  // ---- Adoption (G10) ---------------------------------------------------------------------------------------------
+
+  /**
+   * Take over an app the registry says this plugin started in an earlier session. The caller has already checked that
+   * a recorded member is alive (the stale-entry rule); `members` are the group's members as that look saw them. The
+   * instance exists at once, so a second adoption of the same slug is refused (F10). Its port is found by
+   * `rediscover`, and from now on a 5 s poll watches for its death (E21).
+   */
+  adopt(entry: RegistryEntry, project: Project, members: readonly Member[]): "adopted" | "refused" {
+    if (this.disposed || this.instances.has(entry.slug)) return "refused";
+    const inst: Instance = {
+      slug: entry.slug,
+      project: { ...project },
+      state: "running",
+      logFile: logPath(this.deps.runtimeDir, entry.slug),
+      startedAt: entry.startedAt,
+      pgid: entry.pgid,
+      members: mergeMembers(entry.members, members),
+      port: entry.port,
+      url: null,
+      abort: new AbortController(),
+      cancelled: false,
+      errored: false,
+      ready: Promise.resolve({ kind: "cancelled" }),
+      resolveReady: () => undefined,
+      stopped: null,
+      endCause: "requested",
+      held: false,
+      heldReason: "",
+      adopted: true,
+      browserSessionExpected: entry.browserSessionExpected,
+    };
+    this.instances.set(entry.slug, inst);
+    this.liveness.watch(entry.slug);
+    this.emit({ type: "changed", slug: entry.slug });
+    return "adopted";
+  }
+
+  /** Write the instance's current entry to the registry (members, port, flag). A failed write leaves the earlier entry. */
+  async persist(slug: string): Promise<void> {
+    const inst = this.instances.get(slug);
+    if (!inst || inst.pgid <= 0 || inst.state === "stopping" || this.disposed) return;
+    await this.deps.registry.set(this.entryOf(inst)).catch(() => undefined);
+  }
+
+  /**
+   * Find the port an adopted app listens on now, without asking anything of the registry first: the recorded group's
+   * live members only (ps scoped to them, lsof scoped to their pids). The recorded port wins if it still answers;
+   * otherwise a port serving HTML, the lowest one when there are several (no picker at launch), else the lowest
+   * answering port. A project URL override must still be a port this group listens on. Returns what it found.
+   */
+  async rediscover(slug: string): Promise<Rediscovery | null> {
+    const inst = this.instances.get(slug);
+    if (!inst || inst.state !== "running" || this.disposed) return null;
+    const rows = await this.deps.table.snapshotScoped({ pids: inst.members.map((m) => m.pid), pgids: [inst.pgid] });
+    if (!isOwned(rows, inst.pgid, inst.members)) return null;
+    const current = membersOf(rows, inst.pgid);
+    inst.members = mergeMembers(inst.members, current);
+    const listeners = parseLsof(await this.deps.lsof(current.map((m) => m.pid)));
+    const override = inst.project.urlOverride.trim();
+    const overridePort = override !== "" && isLoopbackUrl(override) ? Number(new URL(override).port || (/^https:/i.test(override) ? 443 : 80)) : null;
+    const targets = loopbackCandidates(listeners)
+      .filter((c) => overridePort === null || c.port === overridePort)
+      .map((c) => ({ port: c.port, url: overridePort !== null ? override : `http://${c.host}:${c.port}/` }));
+    const probed = await Promise.all(targets.map(async (t) => ({ t, r: await probe(t.url, { httpGet: this.deps.http, clock: this.deps.clock }) })));
+    const answered = probed.filter((p) => p.r !== null);
+    if (answered.length === 0 || this.disposed || this.instances.get(slug) !== inst || inst.state !== "running") return null;
+    const answers: Answer[] = answered.map((p) => ({ port: p.t.port, html: p.r!.html }));
+    let port: number;
+    if (inst.port !== null && answers.some((a) => a.port === inst.port)) port = inst.port;
+    else {
+      const choice = choosePort(answers);
+      port = choice.kind === "port" ? choice.port : choice.kind === "picker" ? choice.ports[0] : answers[0].port;
     }
+    const url = answered.find((p) => p.t.port === port)!.t.url;
+    const changed = inst.port !== port || inst.url !== url;
+    inst.port = port;
+    inst.url = url;
+    if (changed) {
+      this.emit({ type: "changed", slug });
+      await this.deps.registry.set(this.entryOf(inst)).catch(() => undefined);
+    }
+    return { port, url };
+  }
+
+  /**
+   * One tick of the liveness poll (E21). The look names only the recorded members and the recorded group. With none of
+   * them alive (same pid and start time) the app is gone: the entry is dropped once and the tab shows App stopped.
+   * Otherwise any new members of the group are recorded, in memory and in the registry.
+   * While the port is still unknown (the app was adopted mid-start) each tick tries to find it.
+   */
+  private async checkAdopted(slug: string): Promise<LivenessVerdict> {
+    const inst = this.instances.get(slug);
+    if (this.disposed || !inst || !inst.adopted) return "gone";
+    if (inst.state !== "running") return "alive";
+    const rows = await this.deps.table.snapshotScoped({ pids: inst.members.map((m) => m.pid), pgids: [inst.pgid] });
+    if (this.disposed || this.instances.get(slug) !== inst || inst.state !== "running") return "alive";
+    if (!isOwned(rows, inst.pgid, inst.members)) {
+      await this.markDied(inst);
+      return "gone";
+    }
+    // Record members that joined the group since the last look, so a later relaunch still finds the app by one of them.
+    const merged = mergeMembers(inst.members, membersOf(rows, inst.pgid));
+    if (merged.length !== inst.members.length) {
+      inst.members = merged;
+      await this.deps.registry.set(this.entryOf(inst)).catch(() => undefined);
+    }
+    if (inst.url === null) await this.rediscover(slug).catch(() => undefined);
+    return "alive";
   }
 
   // ---- Project delete ---------------------------------------------------------------------------------------------
@@ -461,7 +652,7 @@ export class InstanceManager implements RuntimeSeams {
   async removeRuntime(project: Project): Promise<void> {
     const inst = this.instances.get(project.slug);
     if (inst) {
-      if (inst.state !== "stopping") this.beginStop(inst, inst.state === "starting", false);
+      if (inst.state !== "stopping") this.beginStop(inst, inst.state === "starting");
       await inst.stopped;
     }
     await this.deps.registry.remove(project.slug).catch(() => undefined);

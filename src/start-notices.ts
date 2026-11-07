@@ -37,7 +37,7 @@ export type StartFailure =
   // 60 s passed with no loopback port answering (E3, E16).
   | { kind: "timeout" }
   | { kind: "spawn-failed"; message: string }
-  | { kind: "registry-failed" }
+  | { kind: "registry-failed"; message?: string }
   | { kind: "internal"; message: string };
 
 function withLog(headline: string, logText: string): string {
@@ -53,8 +53,10 @@ export function startFailureNotice(name: string, failure: StartFailure, logText:
       return `${name} was not started: its folder ${failure.folder} is missing or has moved. Fix the folder in App Runner settings.`;
     case "spawn-failed":
       return withLog(`${name} could not be started: ${failure.message}`, logText);
-    case "registry-failed":
-      return withLog(`${name} was stopped because App Runner could not record it, and an app it cannot track must not keep running.`, logText);
+    case "registry-failed": {
+      const why = failure.message ? ` (${failure.message.replace(/\s+/g, " ").slice(0, 200)})` : "";
+      return withLog(`${name} was stopped because App Runner could not record it${why}, and an app it cannot track must not keep running.`, logText);
+    }
     case "internal":
       return withLog(`${name} could not be started: ${failure.message}`, logText);
     case "exited":

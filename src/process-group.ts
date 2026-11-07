@@ -48,20 +48,48 @@ export function isOwned(rows: readonly ProcRow[], pgid: number, recorded: readon
   return rows.some((r) => r.pgid === pgid && recorded.some((m) => m.pid === r.pid && m.startTime === r.startTime));
 }
 
-/** Where process snapshots come from: `ps` in the real plugin, canned text in tests. */
-export interface ProcessTable {
-  snapshot(): Promise<ProcRow[]>;
+/** The highest pid macOS hands out. `ps -p` fails outright (and prints nothing) for a larger one, so none is ever asked about. */
+export const MAX_PID = 99999;
+
+/** What a scoped look at the process table may name: recorded pids and recorded process groups, nothing else (F14). */
+export interface PsScope {
+  pids: readonly number[];
+  pgids: readonly number[];
 }
 
-export const PS_ARGS = ["-axo", "pid=,pgid=,lstart="];
+/**
+ * Where process snapshots come from: `ps` in the real plugin, canned text in tests. There is deliberately no way to list
+ * every process (F14): each look names the recorded pids and groups it is about, and `ps` is run with `-p` and `-g`.
+ */
+export interface ProcessTable {
+  /** Only the named pids and the members of the named groups. */
+  snapshotScoped(scope: PsScope): Promise<ProcRow[]>;
+}
+
+/** The `ps` arguments for a scoped look: `-p <pids> -g <groups>`. Null when there is nothing to ask about. */
+export function scopedPsArgs(scope: PsScope): string[] | null {
+  const pids = [...new Set(scope.pids)].filter((p) => Number.isInteger(p) && p > 1 && p <= MAX_PID);
+  const pgids = [...new Set(scope.pgids)].filter((p) => Number.isInteger(p) && p > 1 && p <= MAX_PID);
+  if (pids.length === 0 && pgids.length === 0) return null;
+  const args = ["-o", "pid=,pgid=,lstart="];
+  if (pids.length > 0) args.push("-p", pids.join(","));
+  if (pgids.length > 0) args.push("-g", pgids.join(","));
+  return args;
+}
+
+// LC_ALL=C keeps the lstart text the same across calls whatever the user's locale.
+const PS_ENV = () => ({ ...process.env, LC_ALL: "C" });
 
 export const realProcessTable: ProcessTable = {
-  snapshot: () =>
+  snapshotScoped: (scope) =>
     new Promise((resolve, reject) => {
-      // LC_ALL=C keeps the lstart text the same across calls whatever the user's locale.
-      execFile("ps", PS_ARGS, { env: { ...process.env, LC_ALL: "C" }, maxBuffer: 32 * 1024 * 1024 }, (err, stdout) => {
-        if (err) reject(err);
-        else resolve(parsePs(stdout));
+      const args = scopedPsArgs(scope);
+      if (!args) return resolve([]);
+      execFile("ps", args, { env: PS_ENV(), maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+        // ps exits 1 when none of the named processes exist: that is an empty answer, not a failure.
+        const code = (err as { code?: unknown } | null)?.code;
+        if (err && !(code === 1 && (stdout ?? "").trim() === "")) reject(err);
+        else resolve(parsePs(stdout ?? ""));
       });
     }),
 };
@@ -101,8 +129,6 @@ export interface StopGroupOptions {
    * ownership (its pid cannot be reused while it lives), so the group is signalled even when no recorded member matches.
    */
   leaderAlive?: () => boolean;
-  /** Send SIGTERM before the first `ps` (only with a live leader). For plugin unload. */
-  immediate?: boolean;
   graceMs?: number;
   pollMs?: number;
 }
@@ -122,21 +148,16 @@ export async function stopGroup(o: StopGroupOptions): Promise<StopOutcome> {
   // children started after the last time the registry was written. They are recorded before SIGTERM so a child that
   // ignores it is still found (and SIGKILLed) after the leader has gone.
   const adopt = (rows: readonly ProcRow[]) => (recorded = mergeMembers(recorded, membersOf(rows, o.pgid)));
-  if (o.immediate && trusted) {
-    // Obsidian is unloading and may not live long enough for a `ps`: signal first, look afterwards.
-    if (signalGroup(o.kill, o.pgid, "SIGTERM") === "gone") return "gone";
-    adopt(await o.table.snapshot());
-  } else {
-    const rows = await o.table.snapshot();
-    if (!trusted && !isOwned(rows, o.pgid, recorded)) return "not-ours";
-    adopt(rows);
-    if (signalGroup(o.kill, o.pgid, "SIGTERM") === "gone") return "gone";
-  }
+  const look = () => o.table.snapshotScoped({ pids: recorded.map((m) => m.pid), pgids: [o.pgid] });
+  const rows = await look();
+  if (!trusted && !isOwned(rows, o.pgid, recorded)) return "not-ours";
+  adopt(rows);
+  if (signalGroup(o.kill, o.pgid, "SIGTERM") === "gone") return "gone";
 
   const deadline = o.clock.now() + graceMs;
   while (o.clock.now() < deadline) {
     await o.clock.sleep(Math.min(pollMs, Math.max(1, deadline - o.clock.now())));
-    if (!isOwned(await o.table.snapshot(), o.pgid, recorded)) return "terminated";
+    if (!isOwned(await look(), o.pgid, recorded)) return "terminated";
   }
   signalGroup(o.kill, o.pgid, "SIGKILL");
   return "killed";

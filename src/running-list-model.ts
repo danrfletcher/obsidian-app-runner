@@ -1,5 +1,8 @@
 import type { InstanceInfo, InstanceState } from "./instance";
 
+/** G7: how a row says the app outlived the last Obsidian session. */
+export const STILL_RUNNING_TEXT = "Still running from last session";
+
 /** One row of the running list (G7), with every cell already worded. */
 export interface RunningRow {
   slug: string;
@@ -17,6 +20,8 @@ export interface RunningRow {
   canStop: boolean;
   /** Show log is disabled when no log file exists (G17). */
   canShowLog: boolean;
+  /** G7: found in the registry at launch; the row says "Still running from last session". */
+  adopted: boolean;
 }
 
 export interface RowInputs {
@@ -64,10 +69,12 @@ export function buildRunningRows(infos: readonly InstanceInfo[], inputs: RowInpu
       canOpen: info.state === "running",
       canStop: info.state !== "stopping",
       canShowLog: inputs.logExists(info.slug),
+      adopted: info.adopted,
     }));
 }
 
 /** The one-line summary under a row's name. */
 export function rowSummary(row: RunningRow): string {
-  return `${row.state}  ·  port ${row.portText}  ·  started ${row.startedText}  ·  ${row.sessionsText}`;
+  const summary = `${row.state}  ·  port ${row.portText}  ·  started ${row.startedText}  ·  ${row.sessionsText}`;
+  return row.adopted ? `${summary}  ·  ${STILL_RUNNING_TEXT}` : summary;
 }

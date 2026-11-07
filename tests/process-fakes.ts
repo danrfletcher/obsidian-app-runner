@@ -3,9 +3,9 @@ import type { SpawnOptions } from "node:child_process";
 import { FakeClock } from "./fake-clock";
 import { InstanceManager, type InstanceDeps } from "../src/instance";
 import type { HttpGet } from "../src/loopback-http";
-import type { Signal, ProcRow, ProcessTable } from "../src/process-group";
+import type { Signal, ProcRow, ProcessTable, PsScope } from "../src/process-group";
 import type { Project } from "../src/project";
-import type { RegistryEntry, RegistryLike } from "../src/registry";
+import type { RegistryEntry, RegistryReadResult, RegistryStore } from "../src/registry";
 import type { RuntimeFs } from "../src/runtime-fs";
 import type { SpawnedChild } from "../src/spawn";
 
@@ -97,8 +97,22 @@ export class FakeWorld {
     removeFile: async (file) => void this.logs.delete(file),
   };
 
+  /** Every `ps` look, with the scope it was asked for (F14: there is no unscoped look). */
+  psCalls: PsScope[] = [];
+  /** Every lsof call: the pids it was scoped to. */
+  lsofCalls: Array<readonly number[]> = [];
+
+  private rows(): ProcRow[] {
+    return this.procs.map<ProcRow>((p) => ({ pid: p.pid, pgid: p.pgid, startTime: p.startTime }));
+  }
+
   table: ProcessTable = {
-    snapshot: async () => this.procs.map<ProcRow>((p) => ({ pid: p.pid, pgid: p.pgid, startTime: p.startTime })),
+    snapshotScoped: async (scope) => {
+      this.psCalls.push({ pids: [...scope.pids], pgids: [...scope.pgids] });
+      const pids = new Set(scope.pids);
+      const pgids = new Set(scope.pgids);
+      return this.rows().filter((r) => pids.has(r.pid) || pgids.has(r.pgid));
+    },
   };
 
   /** Remove processes, and tell the child object when its leader is among them. */
@@ -133,6 +147,7 @@ export class FakeWorld {
   };
 
   lsof = async (pids: readonly number[]): Promise<string> => {
+    this.lsofCalls.push([...pids]);
     const lines = ["COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME"];
     for (const pid of pids) {
       for (const [address, port] of this.listening.get(pid) ?? []) {
@@ -199,8 +214,15 @@ export class FakeWorld {
   }
 }
 
-export class FakeRegistry implements RegistryLike {
+export class FakeRegistry implements RegistryStore {
   entries = new Map<string, RegistryEntry>();
+  /** What `read` reports as the file's problem, if a test wants to show one. */
+  problem: RegistryReadResult["problem"];
+  failReads = false;
+  async read(): Promise<RegistryReadResult> {
+    if (this.failReads) throw new Error("EACCES");
+    return { version: 1, entries: Object.fromEntries([...this.entries].map(([k, v]) => [k, JSON.parse(JSON.stringify(v))])), problem: this.problem };
+  }
   sets = 0;
   removes = 0;
   failSets = false;
