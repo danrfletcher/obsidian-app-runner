@@ -3,9 +3,9 @@ export const NOTICE_LOG_LINES = 10;
 /** A log line longer than this is cut, so one huge line cannot fill the notice. */
 export const NOTICE_LINE_MAX = 200;
 
-// eslint-disable-next-line no-control-regex
+// eslint-disable-next-line no-control-regex -- matches the ESC and BEL control characters of ANSI colour sequences
 const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b\][^\u0007]*\u0007/g;
-// eslint-disable-next-line no-control-regex
+// eslint-disable-next-line no-control-regex -- strips control characters from log lines before they go in a notice
 const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f]/g;
 
 /**
