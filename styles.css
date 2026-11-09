@@ -1,0 +1,56 @@
+.workspace-leaf-content[data-type="app-runner-view"] .view-content {
+  padding: 0;
+  overflow: hidden;
+}
+
+.app-runner-webview {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.app-runner-message {
+  padding: var(--size-4-4);
+  color: var(--text-muted);
+}
+
+.app-runner-error {
+  color: var(--text-error);
+  font-size: var(--font-ui-smaller);
+  margin: var(--size-4-1) 0;
+}
+
+/* G8/G9: the App stopped panel. Theme variables only, so it reads in light and dark. */
+.app-runner-stopped {
+  padding: var(--size-4-4);
+  color: var(--text-normal);
+}
+
+.app-runner-stopped h3 {
+  margin: 0 0 var(--size-4-2);
+}
+
+.app-runner-stopped p {
+  margin: 0 0 var(--size-4-2);
+  color: var(--text-muted);
+}
+
+.app-runner-stopped-label {
+  font-size: var(--font-ui-smaller);
+}
+
+.app-runner-log {
+  margin: 0 0 var(--size-4-4);
+  padding: var(--size-4-2) var(--size-4-3);
+  max-height: 16em;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  color: var(--text-normal);
+  background: var(--background-secondary);
+  border-radius: var(--radius-s);
+  user-select: text;
+}
