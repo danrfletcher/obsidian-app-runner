@@ -1,7 +1,7 @@
 {
   "id": "app-runner",
   "name": "App Runner",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minAppVersion": "1.13.0",
   "description": "Register local apps with a start command, open them in tabs, and stop them when the last tab closes.",
   "author": "Dan Fletcher",
